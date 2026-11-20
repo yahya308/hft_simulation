@@ -1,6 +1,6 @@
-# BISTECH HFT simülatörü
+# BISTECH Pay Piyasası HFT simülatörü
 
-`hft_replay`, BISTECH ITCH v2112 taşıyan bir PCAP'tan emir defterini yeniden kurar ve görünür fiyatlı emirleri sıralı olarak gösterir. [Geliştirme planı](GELISTIRME_PLANI.md)
+`hft_replay`, Borsa İstanbul Pay Piyasası'nın BISTECH ITCH v2112 kayıtlarından emir defterini yeniden kurar ve görünür fiyatlı emirleri sıralı olarak gösterir. [Geliştirme planı](GELISTIRME_PLANI.md)
 
 ## Nasıl çalışır?
 
@@ -8,7 +8,7 @@
 2. MoldUDP64 sıra numaralarını kontrol eder ve ITCH mesajlarını okur. Eksik sıra numarası görürse durur.
 3. Emir ekleme, gerçekleşme ve silme mesajlarını deftere uygular. Dosyanın sonunda kalan fiyatlı emirleri yazar. Aynı fiyattaki emirlerde BIST'in sıralama zamanı ve sıra numarası kullanılır.
 
-Bu sürüm çevrimdışı piyasa verisi replay'i yapar. OUCH emir girişi geliştirme planının sonraki aşamasında.
+Bu sürüm çevrimdışı Pay Piyasası verisini yeniden oynatır. Pay Piyasası OUCH emir girişi geliştirme planının sonraki aşamasında.
 
 ## Derleme ve test
 
@@ -26,7 +26,7 @@ ctest --test-dir build --output-on-failure
 .\build\hft_replay.exe .\capture.pcap 239.1.2.3 31000
 ```
 
-IPv4 adresini ve UDP portunu kayıttaki ITCH hedefiyle değiştir. Linux'ta çalıştırılabilir dosya `./build/hft_replay`. İlk sürüm klasik PCAP 2.4, Ethernet/VLAN ve IPv4/UDP destekler. Seçilen hedefte tek kaynak ve MoldUDP64 oturumu bekler. Kayıt `T` ve `S/O` seans başlangıcını içermeli. Seans içinden başlama ve sıra boşluğu kurtarma planın sonraki aşamasında.
+IPv4 adresini ve UDP portunu kayıttaki **Pay Piyasası ITCH kanalının** hedefiyle değiştir. Karma kayıtlarda yalnızca seçilen hedefe ait paketler işlenir. Linux'ta çalıştırılabilir dosya `./build/hft_replay`. İlk sürüm klasik PCAP 2.4, Ethernet/VLAN ve IPv4/UDP destekler. Seçilen hedefte tek kaynak ve MoldUDP64 oturumu bekler. Kayıt `T` ve `S/O` seans başlangıcını içermeli. Seans içinden başlama ve sıra boşluğu kurtarma planın sonraki aşamasında.
 
 Çıktı UTF-8 ve sekmeyle ayrılmıştır. Zamanlar Unix epoch nanosaniye cinsindendir. Fiyatlar, defterin referans verisindeki fiyat ölçeğine karşılık gelen ham işaretli tamsayılardır.
 

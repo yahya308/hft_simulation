@@ -1,10 +1,10 @@
-# BISTECH HFT simülatörü geliştirme planı
+# BISTECH Pay Piyasası HFT simülatörü geliştirme planı
 
 ## Amaç ve ilk kapsam
 
-Proje, Borsa İstanbul ITCH trafiğini bir yakalama dosyasından okuyarak görünür emir defterini emir bazında yeniden kuracak. Yerel bir BISTECH OUCH sunucusu strateji emirlerini kabul edecek, sanal borsa saatinde sıraya alacak ve gerçekleşme sonuçlarını üretecek. Aynı girdi dosyaları ve ayarlarla aynı defter durumu ve aynı yanıt dizisi elde edilmeli.
+Projenin piyasa kapsamı yalnızca Borsa İstanbul Pay Piyasası. Yakalama dosyasından Pay Piyasası ITCH trafiği okunup görünür emir defteri emir bazında yeniden kurulacak. Yerel bir BISTECH OUCH sunucusu strateji emirlerini kabul edecek, sanal borsa saatinde sıraya alacak ve gerçekleşme sonuçlarını üretecek. Aynı girdi dosyaları ve ayarlarla aynı defter durumu ve aynı yanıt dizisi elde edilmeli.
 
-İlk hedef Pay Piyasası, tek mantıksal ITCH akışı, seçilmiş paylar ve sürekli işlem. OUCH kapsamı yuvarlak lotlu Day limit alış ve satış emirleri ile Enter, Replace ve Cancel. Açılış, kapanış, devre kesici ve diğer fazlar tarihsel defterde izlenir. Simüle eşleştirme sürekli işlem fazında çalışır. Çoklu partition, ayrı eski ITCH profili, IOC/FOK, Mass Quote, açığa satış, rezerv emir ve müzayede eşleştirmesi sonraki kapsamlar. Parçaların uygunluğu BISTECH revizyonu ve kullanılan kayıt üzerinden doğrulanır. [BIST teknik dokümanları](https://borsaistanbul.com/en/technical-resources/technical-documents) · [Pay Piyasası İşleyişi](https://www.borsaistanbul.com/piyasalar/pay-piyasasi/piyasa-isleyisi)
+İlk hedef tek mantıksal Pay Piyasası ITCH akışı, seçilmiş paylar ve sürekli işlem. OUCH kapsamı yuvarlak lotlu Day limit alış ve satış emirleri ile Enter, Replace ve Cancel. Açılış, kapanış, devre kesici ve diğer fazlar tarihsel defterde izlenir. Simüle eşleştirme sürekli işlem fazında çalışır. Pay Piyasası'nın birden fazla partition'ını birleştirme, eski ITCH profili, IOC/FOK, Mass Quote, açığa satış, rezerv emir ve müzayede eşleştirmesi sonraki aşamalarda değerlendirilir. Parçaların uygunluğu BISTECH revizyonu ve kullanılan kayıt üzerinden doğrulanır. [BIST teknik dokümanları](https://borsaistanbul.com/en/technical-resources/technical-documents) · [Pay Piyasası İşleyişi](https://www.borsaistanbul.com/piyasalar/pay-piyasasi/piyasa-isleyisi)
 
 ## Veri akışı ve modül sınırları
 
