@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="tr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0c121b">
+    <title>Pay Piyasası Simülatörü</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script defer src="/app.js"></script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>BISTECH Simülatörü</div>
+            <div class="connection"><span class="signal" id="connection-dot" aria-hidden="true"></span><span id="connection">Bağlanıyor</span><span class="help" data-help="Dashboard ile yerel replay sunucusunun bağlantı durumu."></span></div>
+        </div>
+    </header>
+
+    <main>
+        <section class="page-head" aria-label="Enstrüman ve oturum">
+            <div>
+                <div class="instrument"><h1 id="instrument-title">Pay Piyasası</h1><span class="market-tag" id="instrument-tag" hidden>Pay Piyasası</span></div>
+                <p class="session-file"><span id="active-file">Kayıt seçilmedi</span><span class="help" data-help="Şu anda yüklenen veya replay edilen tarihsel PCAP kaydı."></span></p>
+            </div>
+            <div class="headline-right">
+                <span class="phase-badge" id="phase-badge"><span class="signal" aria-hidden="true"></span><span id="phase" role="status">Bekliyor</span></span><span class="help" data-help="Yükleme, oynatma, duraklatma veya oturumun tamamlanma durumu."></span>
+                <div class="clock"><span id="market-time">--:--:--</span><span class="clock-zone">TSİ</span><span class="help" data-help="Replay’in Türkiye saatiyle gösterilen sanal zamanı. Gerçek bilgisayar saatinden bağımsızdır."></span></div>
+            </div>
+        </section>
+
+        <p id="error" class="notice" role="alert" hidden></p>
+
+        <section class="panel control-panel" aria-labelledby="replay-title">
+            <div class="section-head">
+                <h2 id="replay-title">Replay kontrolü</h2>
+                <div class="progress-strip" aria-label="Replay istatistikleri">
+                    <span>Olay <strong id="events">—</strong><span class="help" data-help="Bu oturumda işlenen seçili hisselerin ve oturum olaylarının toplam sayısı."></span></span>
+                    <span>Sıra <strong id="sequence">—</strong><span class="help" data-help="Tek kanalda MoldUDP64 sıra numarası, birden çok kanalda birleştirilmiş replay sırası."></span></span>
+                    <span>Gerçek hız <strong id="actual-speed">—</strong><span class="help" data-help="İşlenen piyasa zamanının aktif gerçek süreye oranı. Bilgisayar yükü ve kayıt aralıkları nedeniyle hedeften farklı olabilir."></span></span>
+                    <span>Seans <strong id="market-status">—</strong><span class="help" data-help="Görüntülenen hissenin kayıttaki son işlem fazı. Strateji sürekli işlem sırasında kotasyon gönderir."></span></span>
+                </div>
+            </div>
+            <form id="capture-form" class="capture-form">
+                <div class="field capture-field"><span class="field-label"><label for="capture">PCAP kaydı</label><span class="help" data-help="Çalışma alanındaki yerel ağ yakalama dosyası. Replay yalnızca seçilen hisseler için Pay Piyasası ITCH olaylarını işler."></span></span><select id="capture" required><option value="">Kayıt yok</option></select></div>
+                <div class="field"><span class="field-label"><label for="host">Hedef IP</label><span class="help" data-help="PCAP içindeki Pay Piyasası ITCH multicast kanalının hedef IPv4 adresi."></span></span><input id="host" placeholder="IPv4 adresi" autocomplete="off" required></div>
+                <div class="field port-field"><span class="field-label"><label for="port">Başlangıç UDP portu</label><span class="help" data-help="Kanal taramasının başlangıç portu. Standart 21001–21004 aralığında katalog bu dört Pay Piyasası portundaki hisseleri birlikte listeler."></span></span><input id="port" type="number" min="1" max="65535" placeholder="Port" required></div>
+                <div class="source-actions" id="source-actions">
+                    <button type="submit" class="button secondary" id="list-instruments" disabled>Hisseleri listele</button>
+                    <span class="help" data-help="Seçilen kayıttaki Pay Piyasası ITCH hisse tanımlarını bulur. Sonuçlarda her hissenin kaynak portu görünür."></span>
+                </div>
+                <div class="symbol-picker" id="symbol-picker">
+                    <div class="symbol-picker-head">
+                        <div class="field symbol-search-field" id="symbol-search-field" hidden><span class="field-label"><label for="symbol-search">Hisse ara</label><span class="help" data-help="Kodun bir bölümünü yaz. Arama sadece görünen seçenekleri filtreler ve işaretlenen hisseleri korur."></span></span><input type="search" id="symbol-search" placeholder="Hisse kodu" autocomplete="off"></div>
+                        <div class="symbol-count" id="symbol-count-wrap" hidden><span id="symbol-count">0 hisse seçildi</span><span class="help" data-help="İşaretli hisselerin tamamı aynı replay oturumuna eklenir."></span></div>
+                    </div>
+                    <ul class="symbol-selection" id="symbol-selection" aria-label="Seçilen hisseler" hidden></ul>
+                    <div class="symbol-results" id="symbol-results" role="group" aria-label="Kayıttaki hisseler" hidden></div>
+                    <p class="symbol-feedback" id="symbol-feedback" role="status">Kaydı ve kanalı seçip hisseleri listele.</p>
+                    <button type="submit" class="button secondary" id="load" disabled>Kaydı yükle</button>
+                </div>
+            </form>
+            <div class="transport">
+                <div class="transport-actions">
+                    <button class="button primary" id="start" type="button" disabled><span class="play-icon" aria-hidden="true"></span><span id="start-label">Başlat</span></button>
+                    <button class="button secondary" id="pause" type="button" disabled>Duraklat</button>
+                    <button class="button secondary" id="reset" type="button" disabled>Başa al</button>
+                    <button class="button secondary" id="advance-open" type="button" disabled>Sürekli işleme ilerle</button><span class="help" data-help="Önceki olayları sırasıyla işleyip görüntülenen hisse sürekli işlem fazına girdiğinde duraklar. Seçilen replay hızı korunur."></span>
+                </div>
+                <div class="speed-control">
+                    <span class="field-label"><span>Oynatma hızı</span><span class="help" data-help="1× kayıt zamanıyla gerçek zamanlı oynatır. 1.000× kayıt zamanını bin katına kadar sıkıştırır. Maks modunda zaman beklemeleri kaldırılır."></span></span>
+                    <div class="speed-presets" role="group" aria-label="Hız hazır ayarları">
+                        <button type="button" data-speed="1" aria-pressed="true">1×</button><button type="button" data-speed="10" aria-pressed="false">10×</button><button type="button" data-speed="100" aria-pressed="false">100×</button><button type="button" data-speed="1000" aria-pressed="false">1.000×</button><button type="button" data-speed="max" aria-pressed="false">Maks</button>
+                    </div>
+                    <form id="speed-form" class="speed-form"><input id="custom-speed" type="number" min="1" max="1000" step="1" value="1" aria-label="Özel replay hızı" required><button class="button secondary" type="submit">Ayarla</button></form>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel instruments-panel" id="instruments-panel" aria-labelledby="instruments-title" hidden>
+            <div class="section-head"><h2 id="instruments-title">Oturumdaki hisseler <span class="help" data-help="Replay bütün seçili hisseleri birlikte işler. Bir hisseye tıklayınca defter, grafik, portföy ve emir günlüğü o hisseyi gösterir."></span></h2></div>
+            <div class="instruments-table-wrap"><table class="instruments-table">
+                <thead><tr><th scope="col">Hisse <span class="help" data-help="Hisse koduna tıklayarak ayrıntı görünümünü değiştir."></span></th><th scope="col">Kaynak <span class="help" data-help="Bu hissenin okunduğu ITCH UDP portu."></span></th><th scope="col">Pozisyon <span class="help" data-help="Hisse bazındaki net sanal pozisyon, pay adedi cinsinden."></span></th><th scope="col">Kâr / zarar <span class="help" data-help="Hissenin gerçekleşen ve gerçekleşmemiş toplam kârı veya zararı, TL cinsinden."></span></th><th scope="col">Gerçekleşme <span class="help" data-help="Oturumda bu hisse için üretilen simüle gerçekleşme sayısı."></span></th></tr></thead>
+                <tbody id="instrument-rows"></tbody>
+            </table></div>
+        </section>
+
+        <section class="stats" aria-label="Strateji göstergeleri">
+            <article class="kpi pnl-kpi"><h2>Toplam kâr / zarar <span class="help" data-help="Net gerçekleşen kâr/zarar ile eldeki pozisyonun gerçekleşmemiş kâr/zararının toplamı."></span></h2><strong id="total-pnl">—</strong><div class="kpi-detail">Gerçekleşen <span id="realized-pnl">—</span><span class="help" data-help="Kapanan işlemlerden oluşan net kâr/zarar. Simülasyonda tanımlı işlem ücretleri hesaba katılır."></span></div></article>
+            <article class="kpi"><h2>Hisse miktarı <span class="help" data-help="Görüntülenen hissenin net strateji pozisyonu. Pozitif değer eldeki hisseyi, negatif değer sanal kısa pozisyonu gösterir."></span></h2><strong id="inventory">—</strong><div class="kpi-detail">Gerçekleşmemiş <span id="unrealized-pnl">—</span><span class="help" data-help="Açık pozisyon, tarihsel ITCH defterindeki son geçerli orta fiyatla değerlenir. Bu fiyat, en iyi alış ve satışın ortalamasıdır."></span></div></article>
+            <article class="kpi"><h2>Ortalama fiyat <span class="help" data-help="Açık pozisyonun ağırlıklı ortalama gerçekleşme fiyatı. Pozisyon sıfırken gösterilmez."></span></h2><strong id="average-price">—</strong><div class="kpi-detail">Nakit <span id="cash">—</span><span class="help" data-help="Simüle işlemlerin ve işlem ücretlerinin nakit hesabına net etkisi."></span></div></article>
+            <article class="kpi quote-kpi bid-kpi"><h2>Strateji alış fiyatı <span class="help" data-help="Seçili stratejinin açık alış emrinin limit fiyatı. Açık emir yoksa tire görünür."></span></h2><strong id="buy-price">—</strong><div class="kpi-detail">Kuyrukta önde <span id="bid-ahead">—</span><span class="help" data-help="Alış emrinin önünde bekleyen görünür hisse adedi."></span></div></article>
+            <article class="kpi quote-kpi ask-kpi"><h2>Strateji satış fiyatı <span class="help" data-help="Seçili stratejinin açık satış emrinin limit fiyatı. Açık emir yoksa tire görünür."></span></h2><strong id="sell-price">—</strong><div class="kpi-detail">Kuyrukta önde <span id="ask-ahead">—</span><span class="help" data-help="Satış emrinin önünde bekleyen görünür hisse adedi."></span></div></article>
+        </section>
+
+        <div class="market-grid">
+            <section class="panel chart-panel" aria-labelledby="chart-title">
+                <div class="section-head chart-heading">
+                    <div><h2 id="chart-title">Oturum grafiği <span class="help" data-help="Replay sürerken kaydedilen anlık orta fiyat veya strateji kâr/zararı örnekleri."></span></h2><div class="current-value" id="chart-value">—</div></div>
+                    <div class="chart-toggle" role="group" aria-label="Grafik verisi">
+                        <button type="button" data-series="mid_price" aria-pressed="true">Orta fiyat</button><span class="help" data-help="Tarihsel ITCH defterindeki en iyi alış ve satış fiyatının ortalaması. Tek taraf eksikse orta fiyat oluşmaz."></span>
+                        <button type="button" data-series="total_pnl" aria-pressed="false">K/Z</button><span class="help" data-help="Replay zamanı boyunca stratejinin toplam kâr/zararının örneklenen seyri."></span>
+                    </div>
+                </div>
+                <div class="chart-area" id="chart-area"><canvas id="chart" role="img" aria-label="Replay boyunca orta fiyat grafiği"></canvas><p id="chart-empty">Grafik için replay’i başlat.</p></div>
+            </section>
+            <section class="panel book-panel" aria-labelledby="book-title">
+                <div class="section-head"><h2 id="book-title">Emir defteri <span class="help" data-help="Simüle defter stratejinin emirlerini ve işlem hacminin fiyat-zaman önceliğine göre dağılımını içerir. Tarihsel defter PCAP kaydındaki ITCH emirlerini gösterir."></span></h2><div class="book-spread">Makas <strong id="spread">—</strong><span class="help" data-help="Seçili defterdeki en iyi satış fiyatı eksi en iyi alış fiyatı."></span></div></div>
+                <div class="book-controls">
+                    <div class="book-control"><label for="book-source">Defter</label><select id="book-source"><option value="simulated">Simüle</option><option value="historical">Tarihsel ITCH</option></select><span class="help" data-help="Aynı anda iki defterden birinin alış ve satış kademelerini gösterir. Bu seçim stratejiyi etkilemez."></span></div>
+                    <div class="book-control"><label for="book-depth">Taraf başına kademe</label><select id="book-depth"><option value="6">6</option><option value="10">10</option><option value="20">20</option></select><span class="help" data-help="Her tarafta tabloda gösterilecek en iyi fiyat kademesi sayısı."></span></div>
+                </div>
+                <p class="book-audit-alert" id="book-audit-alert" role="status" hidden>Kademeler kesişti. Defter yeniden hizalanana kadar strateji duraklatıldı.</p>
+                <div class="book-sides">
+                    <section class="book-side" aria-labelledby="bids-title">
+                        <h3 id="bids-title" class="positive">Alış emirleri <span class="help" data-help="Görünür alış kademeleri. En yüksek alış fiyatı üstte gösterilir."></span></h3>
+                        <div class="book-table-wrap"><table class="book-table" aria-labelledby="bids-title"><thead><tr><th scope="col">Fiyat <span class="help" data-help="Alış kademesinin limit fiyatı, TL cinsinden."></span></th><th scope="col">Miktar <span class="help" data-help="Bu alış kademesinde görünen toplam açık hisse adedi."></span></th><th scope="col">Emir <span class="help" data-help="Bu alış kademesinde görünen açık emir sayısı."></span></th></tr></thead><tbody id="bid-rows"><tr><td colspan="3" class="empty-row">Alış verisi bekleniyor.</td></tr></tbody></table></div>
+                    </section>
+                    <section class="book-side" aria-labelledby="asks-title">
+                        <h3 id="asks-title" class="negative">Satış emirleri <span class="help" data-help="Görünür satış kademeleri. En düşük satış fiyatı üstte gösterilir."></span></h3>
+                        <div class="book-table-wrap"><table class="book-table" aria-labelledby="asks-title"><thead><tr><th scope="col">Fiyat <span class="help" data-help="Satış kademesinin limit fiyatı, TL cinsinden."></span></th><th scope="col">Miktar <span class="help" data-help="Bu satış kademesinde görünen toplam açık hisse adedi."></span></th><th scope="col">Emir <span class="help" data-help="Bu satış kademesinde görünen açık emir sayısı."></span></th></tr></thead><tbody id="ask-rows"><tr><td colspan="3" class="empty-row">Satış verisi bekleniyor.</td></tr></tbody></table></div>
+                    </section>
+                </div>
+                <dl class="book-audit" aria-label="İşlem hacmi dağılımı">
+                    <div><dt>Uygun hacim <span class="help" data-help="Modelin karşı tarafı ve fiyatı doğrulayabildiği tarihsel gerçekleşmelerin toplam lotu."></span></dt><dd id="matching-observed">—</dd></div>
+                    <div><dt>Stratejiye <span class="help" data-help="Uygun hacimden stratejinin emirlerine dağıtılan lot."></span></dt><dd id="matching-strategy">—</dd></div>
+                    <div><dt>Diğer emirlere <span class="help" data-help="Uygun hacimden simüle defterdeki diğer emirlere dağıtılan lot."></span></dt><dd id="matching-historical">—</dd></div>
+                    <div><dt>Dağıtılamayan <span class="help" data-help="Simüle defterde uygun emir bulunamadığı için eşleşmeyen lot."></span></dt><dd id="matching-unallocated">—</dd></div>
+                    <div><dt>Defter düzeltmesi <span class="help" data-help="Alış ve satış kademeleri kesiştiğinde, tarihsel kademelerle çelişen simüle bakiyenin işlem üretmeden kaldırıldığı olay sayısı."></span></dt><dd id="matching-reconciled">—</dd></div>
+                </dl>
+            </section>
+        </div>
+
+        <div class="bottom-grid">
+            <section class="panel strategy-panel" aria-labelledby="strategy-title">
+                <div class="section-head"><h2 id="strategy-title">Strateji <span class="help" data-help="Oturumda seçili tüm hisselere uygulanacak yerel stratejiyi ve test ayarlarını seç."></span></h2><label class="switch-label"><span id="strategy-status">Kapalı</span><input type="checkbox" id="strategy-toggle" aria-label="Stratejiyi aç veya kapat"><span class="switch" aria-hidden="true"></span></label><span class="help" data-help="Seçili stratejinin emir üretmesini açar veya kapatır. Yapılan işlemler test hesabına aittir."></span></div>
+                <div class="strategy-current">
+                    <span class="field-label">Uygulanan strateji <span class="help" data-help="Koşunun emirleri ve sonuçları bu stratejiye aittir. Kimlik ve sürüm, aynı koşuyu yeniden oluşturmak için kullanılabilir."></span></span>
+                    <strong id="strategy-active-name">—</strong>
+                    <code id="strategy-active-key" hidden></code>
+                </div>
+                <form class="config-form" id="config-form">
+                    <div class="field"><span class="field-label"><label for="strategy-select">Strateji seçimi</label><span class="help" data-help="Yerel sunucuya kayıtlı stratejiler. Bir seçimi koşuda kullanmak için Ayarları uygula düğmesine bas."></span></span><select id="strategy-select" aria-describedby="strategy-description strategy-feedback" disabled><option value="">Stratejiler yükleniyor…</option></select><p id="strategy-description" class="strategy-description" hidden></p></div>
+                    <div class="strategy-section" id="parameter-section" hidden>
+                        <h3 id="parameter-title">Strateji ayarları</h3>
+                        <div id="strategy-parameters" class="config-grid" role="group" aria-labelledby="parameter-title"></div>
+                    </div>
+                    <div class="strategy-section">
+                        <h3 id="shared-title">Ortak simülasyon ayarları</h3>
+                        <div id="shared-config" class="config-grid" role="group" aria-labelledby="shared-title">
+                            <div class="field"><span class="field-label"><label for="position-limit">Pozisyon limiti</label><span class="help" data-help="Her hisse için izin verilen en yüksek mutlak sanal pozisyon, pay adedi cinsinden."></span></span><input id="position-limit" name="position_limit" type="number" min="1" max="1000000" step="1" required disabled></div>
+                            <div class="field"><span class="field-label"><label for="latency">Emir gecikmesi (µs)</label><span class="help" data-help="Stratejinin emir kararı ile yerel OUCH motoruna varışı arasındaki sanal süre, mikrosaniye cinsinden."></span></span><input id="latency" name="latency_us" type="number" min="0" max="10000000" step="1" required disabled></div>
+                            <div class="field"><span class="field-label"><label for="fee">Ücret (baz puan)</label><span class="help" data-help="Her gerçekleşmenin parasal değeri üzerinden simüle edilen işlem ücreti. 1 baz puan yüzde 0,01’dir."></span></span><input id="fee" name="fee_bps" type="number" min="0" max="1000" step="1" required disabled></div>
+                        </div>
+                    </div>
+                    <p class="strategy-feedback" id="strategy-feedback" role="status" hidden></p>
+                    <div class="config-actions">
+                        <button type="submit" class="button primary" id="save-config" disabled>Ayarları uygula</button>
+                        <button type="button" class="button secondary" id="discard-config" hidden>Taslağı bırak</button>
+                        <button type="button" class="button secondary" id="retry-strategies" hidden>Listeyi yeniden yükle</button>
+                    </div>
+                </form>
+            </section>
+            <section class="panel journal-panel" aria-labelledby="journal-title">
+                <div class="section-head"><h2 id="journal-title">OUCH emir günlüğü <span class="help" data-help="Stratejinin yerel OUCH emirlerinin ve motor yanıtlarının kronolojik akışı."></span></h2></div>
+                <div class="progress-strip journal-summary">
+                    <span>Gönderilen <strong id="ouch-sent">0</strong><span class="help" data-help="Stratejinin yerel motora gönderdiği OUCH isteklerinin toplamı."></span></span>
+                    <span>Yanıt <strong id="ouch-received">0</strong><span class="help" data-help="Simülatörün ürettiği sıralı OUCH yanıtlarının toplamı."></span></span>
+                    <span>Gerçekleşme <strong id="fill-count">0</strong><span class="help" data-help="Kısmi gerçekleşmeler dahil simüle OUCH E mesajı sayısı."></span></span>
+                </div>
+                <div class="journal-table-wrap"><table class="journal-table"><thead><tr><th scope="col">Sıra <span class="help" data-help="Olayın oturum içindeki sıra numarası."></span></th><th scope="col">Saat <span class="help" data-help="Yanıtın veya emrin simüle piyasa zamanı."></span></th><th scope="col">Taraf <span class="help" data-help="OUCH emrinin alış veya satış tarafı."></span></th><th scope="col">Mesaj <span class="help" data-help="Emir gönderimi veya simülasyon motorunun ürettiği yanıt türü."></span></th><th scope="col">Fiyat <span class="help" data-help="Mesajdaki limit veya gerçekleşme fiyatı, TL cinsinden."></span></th><th scope="col">Miktar <span class="help" data-help="Mesajın bildirdiği emir veya gerçekleşme adedi."></span></th><th scope="col">Durum <span class="help" data-help="Mesajın motor tarafından kaydedilen sonucu."></span></th></tr></thead><tbody id="journal-rows"><tr><td colspan="7" class="empty-row">Henüz OUCH mesajı oluşmadı.</td></tr></tbody></table></div>
+            </section>
+        </div>
+    </main>
+    <div id="info-tooltip" class="info-tooltip" role="note" hidden></div>
+</body>
+</html>

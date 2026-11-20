@@ -2,6 +2,7 @@
 
 #include <compare>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <variant>
@@ -24,6 +25,7 @@ struct Directory {
     std::uint16_t price_decimals;
     std::uint32_t round_lot;
     std::uint8_t ranking_type;
+    std::uint8_t financial_product;
 };
 
 struct TickSize {
@@ -46,9 +48,17 @@ struct Add {
     std::uint64_t rank_time;
 };
 
+struct PricedExecution {
+    std::int32_t trade_price;
+    std::optional<bool> at_cross;
+    std::optional<bool> printable;
+};
+
 struct Execute {
     OrderKey key;
     std::uint64_t quantity;
+    std::uint64_t match_id;
+    std::optional<PricedExecution> priced;
 };
 
 struct Delete {

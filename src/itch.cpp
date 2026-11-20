@@ -20,6 +20,13 @@ std::int32_t read_price(std::span<const std::uint8_t> bytes, std::size_t offset)
     return std::bit_cast<std::int32_t>(read_big_endian<std::uint32_t>(bytes, offset));
 }
 
+std::optional<bool> read_yes_no(std::uint8_t byte) {
+    if (byte == 'Y' || byte == 'N') {
+        return byte == 'Y';
+    }
+    return std::nullopt;
+}
+
 std::string read_alpha(std::span<const std::uint8_t> bytes, std::size_t offset,
                        std::size_t width) {
     while (width != 0 && bytes[offset + width - 1] == ' ') {
@@ -96,6 +103,7 @@ ItchMessage decode_itch(std::span<const std::uint8_t> bytes) {
             read_big_endian<std::uint16_t>(bytes, 89),
             read_big_endian<std::uint32_t>(bytes, 97),
             bytes[129],
+            bytes[85],
         }};
     case 'L':
         return {type, read_nanoseconds(bytes, 25), TickSize{
@@ -118,11 +126,21 @@ ItchMessage decode_itch(std::span<const std::uint8_t> bytes) {
             read_big_endian<std::uint64_t>(bytes, 37),
         }};
     case 'E':
-    case 'C':
-        return {type, read_nanoseconds(bytes, type == 'E' ? 52 : 58), Execute{
+    case 'C': {
+        const bool priced = type == 'C';
+        const auto nanoseconds = read_nanoseconds(bytes, priced ? 58 : 52);
+        Execute event{
             read_order_key(bytes),
             read_big_endian<std::uint64_t>(bytes, 18),
-        }};
+            read_big_endian<std::uint64_t>(bytes, 26),
+            std::nullopt,
+        };
+        if (priced) {
+            event.priced = PricedExecution{read_price(bytes, 52), read_yes_no(bytes[56]),
+                                           read_yes_no(bytes[57])};
+        }
+        return {type, nanoseconds, event};
+    }
     case 'D':
         return {type, read_nanoseconds(bytes, 18), Delete{read_order_key(bytes)}};
     case 'Y':

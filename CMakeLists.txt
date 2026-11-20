@@ -1,22 +1,28 @@
 cmake_minimum_required(VERSION 3.20)
 project(hft_sim LANGUAGES CXX)
 
-add_executable(hft_replay
-    src/main.cpp
+add_library(hft_feed STATIC
     src/pcap.cpp
     src/moldudp.cpp
     src/itch.cpp
     src/order_book.cpp
 )
-target_include_directories(hft_replay PRIVATE include)
-target_compile_features(hft_replay PRIVATE cxx_std_20)
-set_target_properties(hft_replay PROPERTIES CXX_EXTENSIONS OFF)
+target_include_directories(hft_feed PUBLIC include)
+target_compile_features(hft_feed PUBLIC cxx_std_20)
 
-if(MSVC)
-    target_compile_options(hft_replay PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(hft_replay PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+add_executable(hft_replay src/main.cpp)
+add_executable(hft_asels_feed src/asels_feed.cpp)
+target_link_libraries(hft_replay PRIVATE hft_feed)
+target_link_libraries(hft_asels_feed PRIVATE hft_feed)
+
+foreach(target hft_feed hft_replay hft_asels_feed)
+    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endforeach()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -25,6 +31,24 @@ if(BUILD_TESTING)
         add_test(NAME replay_integration COMMAND
             "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/replay_test.py"
             "$<TARGET_FILE:hft_replay>")
+        add_test(NAME asels_feed_integration COMMAND
+            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/feed_test.py"
+            "$<TARGET_FILE:hft_asels_feed>")
+        add_test(NAME asels_ouch_simulation COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_simulation.py)
+        set_tests_properties(asels_ouch_simulation PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME asels_dashboard_integration COMMAND
+            "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/dashboard_test.py"
+            "$<TARGET_FILE:hft_asels_feed>")
+        add_test(NAME strategy_api COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_strategy_api.py)
+        set_tests_properties(strategy_api PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME strategy_dashboard_integration COMMAND
+            "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/strategy_dashboard_test.py"
+            "$<TARGET_FILE:hft_asels_feed>")
+        add_test(NAME multi_simulation COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_multi_simulation.py)
+        set_tests_properties(multi_simulation PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     else()
         message(STATUS "Python 3 unavailable. Skipping the replay integration test.")
     endif()

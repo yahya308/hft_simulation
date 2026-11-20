@@ -27,9 +27,10 @@ def system_event(code):
     return message(b"S", 5) + code
 
 
-def directory(book, symbol):
+def directory(book, symbol, *, financial_product=5):
     data = message(b"R", 130)
     struct.pack_into("!I32s", data, 5, book, symbol.ljust(32))
+    data[85] = financial_product
     struct.pack_into("!H", data, 89, 4)
     struct.pack_into("!I", data, 97, 1)
     data[129] = 1
@@ -55,11 +56,11 @@ def add(book, side, order, price, rank_time, rank_sequence, quantity=10):
     return data
 
 
-def execute(book, side, order, quantity, price=None):
+def execute(book, side, order, quantity, price=None, *, match_id=123, at_cross=b"N", printable=b"N"):
     data = message(b"E" if price is None else b"C", 52 if price is None else 58)
-    struct.pack_into("!QIcQQ", data, 5, order, book, side, quantity, 123)
+    struct.pack_into("!QIcQQ", data, 5, order, book, side, quantity, match_id)
     if price is not None:
-        struct.pack_into("!icc", data, 52, price, b"N", b"N")
+        struct.pack_into("!icc", data, 52, price, at_cross, printable)
     return data
 
 
