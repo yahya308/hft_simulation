@@ -39,6 +39,12 @@ IPv4 adresini ve UDP portunu kayıttaki ITCH hedefiyle değiştir. Linux'ta çal
 
 `capture_prefix` seans başlangıcından dosya sonuna kadar doğrulanan kesiti gösterir. `itch_end` ve `mold_end` yakalanan kapanış işaretlerini belirtir. Sıra boşluğu veya hatalı girdi, standart hata akışına yazılır ve program sıfırdan farklı çıkış kodu verir. Görünür miktarı sıfır olan veya piyasa fiyatı işareti taşıyan emirler kimlikleriyle izlenir ve fiyatlı `ORDER` çıktısı dışında kalır.
 
+Seans sonunda açık emir kalmayabilir. Seans içindeki bir anı görmek için seçilen akışın MoldUDP64 sıra numarasını ver. Örnekte defter 10.000.000 numaralı mesaj uygulandıktan sonra `sequence_limit` durumuyla yazılır.
+
+```powershell
+.\build\hft_replay.exe .\capture.pcap 239.1.2.3 31000 --through-sequence 10000000
+```
+
 ## Gecikmeyi ölç
 
 Aynı komutun sonuna `--metrics` ekle. Defter çıktısı standart çıktıdan, ölçüm satırı standart hata akışından gelir.

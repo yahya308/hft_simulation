@@ -188,6 +188,24 @@ class ReplayTest(unittest.TestCase):
         self.assertLessEqual(metrics["packet_p50_ns"], metrics["packet_p99_ns"])
         self.assertEqual(metrics["packet_p999_ns"], metrics["packet_max_ns"])
 
+    def test_stops_at_the_requested_message_inside_a_packet(self):
+        messages = [seconds(), system_event(b"O"), directory(1, b"ONE"), add(1, b"B", 5, 1000, 20, 1),
+                    delete(1, b"B", 5)]
+        capture = pcap([udp_frame(mold(1, messages))])
+        result = self.replay(capture, "--through-sequence", "4", "--metrics")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0].split("\t")[-1], "sequence_limit")
+        self.assertIn("ORDER\t1\tB\t1000\t20\t1\t5\t10", result.stdout)
+        self.assertIn("\tmessages=4\t", result.stderr)
+        self.assertNotIn("ORDER\t", self.replay(capture).stdout)
+
+        for sequence, error in (("0", "precedes"), ("6", "ended before")):
+            with self.subTest(sequence=sequence):
+                invalid = self.replay(capture, "--through-sequence", sequence)
+                self.assertEqual(invalid.returncode, 1)
+                self.assertEqual(invalid.stdout, "")
+                self.assertIn(error, invalid.stderr)
+
     def test_gap_stops_before_snapshot(self):
         start = udp_frame(mold(1, [seconds(), system_event(b"O")]))
         for next_message in (mold(4), mold(4, [directory(1, b"ONE")]), mold(4, count=0xFFFF)):

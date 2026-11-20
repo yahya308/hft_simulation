@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <random>
 #include <stdexcept>
@@ -83,8 +84,9 @@ private:
     std::int64_t longest_packet_ns_ = 0;
 };
 
-unsigned parse_number(std::string_view text, unsigned maximum, const char* name) {
-    unsigned value = 0;
+template <typename Number>
+Number parse_number(std::string_view text, Number maximum, const char* name) {
+    Number value = 0;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || end != text.data() + text.size() || value > maximum) {
         throw std::runtime_error(std::string("invalid ") + name);
@@ -101,24 +103,48 @@ hft::FeedEndpoint parse_endpoint(std::string_view address, std::string_view port
             throw std::runtime_error("invalid destination IPv4 address");
         }
         endpoint.destination[i] = static_cast<std::uint8_t>(
-            parse_number(address.substr(0, dot), 255, "destination IPv4 address"));
+            parse_number(address.substr(0, dot), 255U, "destination IPv4 address"));
         if (!last) {
             address.remove_prefix(dot + 1);
         }
     }
-    endpoint.port = static_cast<std::uint16_t>(parse_number(port, 65535, "UDP port"));
+    endpoint.port = static_cast<std::uint16_t>(parse_number(port, 65535U, "UDP port"));
     if (endpoint.port == 0) {
         throw std::runtime_error("UDP port must be greater than zero");
     }
     return endpoint;
 }
 
+struct ReplayOptions {
+    bool metrics = false;
+    std::optional<std::uint64_t> through_sequence;
+};
+
+ReplayOptions parse_options(int argc, char** argv) {
+    ReplayOptions options;
+    for (int index = 4; index < argc; ++index) {
+        const std::string_view option(argv[index]);
+        if (option == "--metrics" && !options.metrics) {
+            options.metrics = true;
+        } else if (option == "--through-sequence" && !options.through_sequence && index + 1 < argc) {
+            options.through_sequence = parse_number(
+                argv[++index], std::numeric_limits<std::uint64_t>::max(), "MoldUDP64 sequence limit");
+        } else {
+            throw std::runtime_error("invalid or repeated option: " + std::string(option));
+        }
+    }
+    return options;
+}
+
 class Replay {
 public:
-    std::uint64_t apply_packet(const hft::UdpPacket& udp) {
+    std::uint64_t apply_packet(const hft::UdpPacket& udp, std::optional<std::uint64_t> through_sequence) {
         const auto packet = hft::parse_mold(udp.payload);
         const Sender sender{udp.source, udp.source_port, packet.session};
         if (!sender_) {
+            if (through_sequence && packet.first_sequence > *through_sequence) {
+                throw std::runtime_error("requested sequence precedes the selected capture stream");
+            }
             sender_ = sender;
             next_sequence_ = packet.first_sequence;
         } else if (*sender_ != sender) {
@@ -139,7 +165,11 @@ public:
 
         const auto first_new_sequence = next_sequence_;
         auto blocks = packet.blocks;
-        for (std::uint64_t i = 0; i < packet.message_count; ++i) {
+        std::uint64_t count = packet.message_count;
+        if (through_sequence && count != 0 && packet.first_sequence + count - 1 > *through_sequence) {
+            count = *through_sequence - packet.first_sequence + 1;
+        }
+        for (std::uint64_t i = 0; i < count; ++i) {
             const auto bytes = hft::next_mold_message(blocks);
             const auto sequence = packet.first_sequence + i;
             if (sequence < next_sequence_) {
@@ -156,13 +186,18 @@ public:
         return next_sequence_ - first_new_sequence;
     }
 
-    void write_snapshot(std::ostream& output) const {
+    bool has_reached(std::uint64_t sequence) const {
+        return sender_.has_value() && next_sequence_ > sequence;
+    }
+
+    void write_snapshot(std::ostream& output, bool stopped_at_sequence) const {
         if (!itch_started_) {
             throw std::runtime_error("no ITCH Start of Messages for the selected feed");
         }
+        const auto status = stopped_at_sequence ? "sequence_limit" : mold_ended_ ? "mold_end" :
+                            itch_ended_ ? "itch_end" : "capture_prefix";
         output << "REPLAY\t" << (next_sequence_ - 1) << '\t' << last_capture_ns_ << '\t'
-               << exchange_ns_ << '\t'
-               << (mold_ended_ ? "mold_end" : itch_ended_ ? "itch_end" : "capture_prefix") << '\n';
+               << exchange_ns_ << '\t' << status << '\n';
         book_.write_snapshot(output);
     }
 
@@ -211,13 +246,14 @@ private:
 }  // namespace
 
 int main(int argc, char** argv) {
-    const bool measure = argc == 5 && std::string_view(argv[4]) == "--metrics";
-    if (argc != 4 && !measure) {
-        std::cerr << "Usage: hft_replay <capture.pcap> <destination-ipv4> <udp-port> [--metrics]\n";
+    if (argc < 4) {
+        std::cerr << "Usage: hft_replay <capture.pcap> <destination-ipv4> <udp-port>"
+                     " [--metrics] [--through-sequence <sequence>]\n";
         return 2;
     }
 
     try {
+        const auto options = parse_options(argc, argv);
         const auto endpoint = parse_endpoint(argv[2], argv[3]);
         std::ifstream input(argv[1], std::ios::binary);
         if (!input) {
@@ -227,23 +263,31 @@ int main(int argc, char** argv) {
         Replay replay;
         hft::UdpPacket packet{};
         std::optional<ReplayMetrics> metrics;
-        if (measure) {
+        if (options.metrics) {
             metrics.emplace();
         }
-        const auto replay_start = measure ? Clock::now() : Clock::time_point{};
+        bool stopped_at_sequence = false;
+        const auto replay_start = metrics ? Clock::now() : Clock::time_point{};
         while (reader.next(endpoint, packet)) {
             try {
-                const auto packet_start = measure ? Clock::now() : Clock::time_point{};
-                const auto messages = replay.apply_packet(packet);
+                const auto packet_start = metrics ? Clock::now() : Clock::time_point{};
+                const auto messages = replay.apply_packet(packet, options.through_sequence);
                 if (metrics) {
                     metrics->record(elapsed_ns(packet_start, Clock::now()), messages);
                 }
             } catch (const std::runtime_error& error) {
                 throw std::runtime_error("packet " + std::to_string(packet.index) + ": " + error.what());
             }
+            if (options.through_sequence && replay.has_reached(*options.through_sequence)) {
+                stopped_at_sequence = true;
+                break;
+            }
         }
-        const auto replay_end = measure ? Clock::now() : Clock::time_point{};
-        replay.write_snapshot(std::cout);
+        if (options.through_sequence && !stopped_at_sequence) {
+            throw std::runtime_error("capture ended before the requested sequence");
+        }
+        const auto replay_end = metrics ? Clock::now() : Clock::time_point{};
+        replay.write_snapshot(std::cout, stopped_at_sequence);
         if (!std::cout.flush()) {
             throw std::runtime_error("could not write snapshot");
         }

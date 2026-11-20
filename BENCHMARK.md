@@ -1,6 +1,6 @@
 # PCAP replay performans ölçümü
 
-## Sonuçlar
+## Sentetik kayıt
 
 AMD Ryzen 7 7840HS, Windows build 26200, MinGW GCC 16.2 ve CMake Release (`-O3 -DNDEBUG`). Program tek replay iş parçacığıyla çalıştı. Ölçümde aynı dosyayla her kip için önce bir ısınma koşusu, ardından beş koşu yapıldı.
 
@@ -22,6 +22,23 @@ Sentetik PCAP **4.016.523 ITCH mesajı**, **167.357 paket** ve **182.474.737 bay
 
 Ölçümden önce üç ayrı çalıştırmada defter çıktısı bayt düzeyinde aynıydı. Son Mold sıra numarası ve 16.384 açık emir doğrulandı. Windows çıktısının SHA-256 özeti `a9a1a9af6450b52c45770dcd3f9e28663bdc9d46b41701871f46f27d105ee812`.
 
+## Yerel gerçek BIST kaydı
+
+Aynı cihazda 27,9 GB'lık, birden çok multicast kanalını içeren gerçek PCAP'ın tamamı tarandı. Replay, seçilen tek Pay Piyasası kanalından **39.854.740 ITCH mesajı** ve **13.777.943 UDP paketi** işledi. Seans başlangıcı ve bitişi (`itch_end`) görüldü. Seçili kanalda sıra boşluğu veya defter uyuşmazlığı nedeniyle duruş olmadı.
+
+| Ölçüm | Son doğrulama koşusu |
+|---|---:|
+| Dosya okuma ve replay | 50,974 s |
+| Seçili kanalda etkin hız | yaklaşık 782.000 ITCH mesajı/s |
+| Seans sonu defter çıktısı | 5,706 ms |
+| Veri paketi işleme p50 | **0,70 µs** |
+| Veri paketi işleme p95 | 2,70 µs |
+| Veri paketi işleme p99 | **8,20 µs** |
+| Veri paketi işleme p99,9 | 19,90 µs |
+| Gözlenen en uzun paket işleme | 26,924 ms |
+
+Etkin hız tüm dosyayı tarama süresine göre hesaplandı ve yalnızca seçili akışın mesajları sayıldı. Yüzdelikler 12.742.385 veri paketinden 65.536 örnekle hesaplandı. Paket süreleri, UDP yükü belleğe alındıktan sonraki yerel işlemi ölçer. Tekrar çalıştırmalarda seans sonu TSV çıktısı bayt düzeyinde aynıydı. `--through-sequence 10000000` ile alınan seans içi görüntüde **109.498 görünür fiyatlı emir** vardı. Ham PCAP ve defter çıktıları yerel çalışma alanında tutuldu.
+
 ## Yeniden çalıştırma
 
 Önce [README](README.md) adımlarıyla Release derlemesi al. Python 3.9+ ile bu ölçüm için kullanılan iş yükünü çalıştır.
@@ -36,4 +53,4 @@ Linux'ta çalıştırılabilir dosya yolu `./build/hft_replay`. Betik PCAP'ı ge
 
 - Dışarıdan ölçülen süre süreç başlangıcını, PCAP okuma ve çözmeyi, defter güncellemelerini ve son TSV çıktısının yazılmasını kapsar. Zamanlanan koşularda çıktı işletim sisteminin boş aygıtına yönlendirilir. PCAP üretimi ve hash kontrolü ölçüm dışındadır.
 - `--metrics` replay döngüsünü ve son TSV yazımını ayrı ölçer. Paket süresi, UDP yükü bellekten alındıktan sonra MoldUDP64, ITCH ve defter güncellemesini kapsar. Bir pakette en çok 24 ITCH mesajı vardı. Yüzdelikler paket başınadır ve her koşuda yeni mesaj içeren 167.356 paketten 65.536 örnekle hesaplandı. Her koşunun maksimumu tüm veri paketleri üzerinden alındı.
-- Kipler beşer koşuluk ardışık gruplar halinde çalıştı. Sonuçlar bu cihazın ve sentetik girdinin performans tabanıdır. Gerçek BIST trafiği üzerinde doğrulama, yakalama biçimi, paket yoğunluğu ve seans koşullarıyla tekrarlanmalıdır. OUCH gecikmesi, sunucu ve istemci entegrasyonu tamamlandığında ayrıca ölçülecek.
+- Sentetik kipler beşer koşuluk ardışık gruplar halinde çalıştı. Gerçek veri tablosu bir tam dosya koşusunu gösterir. İki girdideki paket karışımı, işlenen akış sayısı ve dosya hacmi farklıdır. OUCH gecikmesi, sunucu ve istemci entegrasyonu tamamlandığında ayrıca ölçülecek.
