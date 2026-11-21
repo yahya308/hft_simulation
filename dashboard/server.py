@@ -14,10 +14,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .multi_simulation import MultiSimulation
+from .portfolio_risk import parse_shock_percent
 from .replay_stream import ReplayStream
 from .simulation import canonical_symbol
 from .strategy_api import StrategyError
-from .strategy_registry import DEFAULT_STRATEGY, load_registry
+from .strategy_registry import DEFAULT_STRATEGY, LEARNING_QUOTE_STRATEGY, load_registry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +84,7 @@ class Controller:
         self.phase, self.error = "idle", None
         self.file, self.host, self.port = "", DEFAULT_HOST, DEFAULT_PORT
         self.config, self.enabled = DEFAULTS.copy(), True
+        self.shock_percent = parse_shock_percent(-1)
         self.strategy_registry = load_registry() if strategy_registry is None else strategy_registry
         self.strategy_definition = self.strategy_registry.get(DEFAULT_STRATEGY)
         self.strategy_params = self.strategy_definition.resolve({})
@@ -115,7 +117,8 @@ class Controller:
         return self._create_simulation(self.strategy_definition, self.strategy_params, self.config)
 
     def _create_simulation(self, definition, params, config, routes=None):
-        if definition.id in (DEFAULT_STRATEGY, "bid_only") and params["quantity"] > config["position_limit"]:
+        if (definition.id in (DEFAULT_STRATEGY, "bid_only", LEARNING_QUOTE_STRATEGY)
+                and params["quantity"] > config["position_limit"]):
             raise ValueError("Emir miktarı pozisyon limitini aşamaz.")
         routes = self.routes if routes is None else routes
         settings = {"max_position": config["position_limit"], "latency_us": config["latency_us"],
@@ -374,6 +377,8 @@ class Controller:
                 if type(symbol) is not str or symbol not in self.routes:
                     raise ValueError("Bu replay için seçilmiş bir paya geç.")
                 self.focus_symbol = symbol
+            elif action == "risk_shock":
+                self.shock_percent = parse_shock_percent(body.get("percent"))
             elif action in ("start", "advance_open"):
                 if self.phase not in ("ready", "paused"):
                     raise ValueError("Oynatmak için önce bir PCAP hazırla veya oturumu sıfırla.")
@@ -511,6 +516,8 @@ class Controller:
                             sell_price=state.get("quote_ask"))
             selection = {"id": self.strategy_definition.id, "version": self.strategy_definition.version,
                          "params": self.strategy_params.copy()}
+            diagnostics = (self.sim.strategy_diagnostics(self.focus_symbol)
+                           if self.strategy_definition.id == LEARNING_QUOTE_STRATEGY else None)
             config = self.config.copy()
             if self.strategy_definition.id == DEFAULT_STRATEGY:
                 config.update(self.strategy_params)
@@ -519,10 +526,12 @@ class Controller:
                     "seeking_open": self.seeking_open,
                     "strategy_enabled": self.enabled, "config": config, "market_phase": state.get("phase"),
                     "strategy_selection": selection, "strategy_error": self.strategy_error,
+                    "strategy_diagnostics": diagnostics,
                     "strategy_controls": list(self.strategy_controls),
                     "catalog": self.catalog, "symbols": self.symbols, "focus_symbol": self.focus_symbol,
                     "instruments": [{**item, "source_port": self.routes[item["symbol"]]}
                                     for item in self.sim.summaries()],
+                    "risk": self.sim.price_shock(self.shock_percent),
                     "progress": {"events": self.events, "sequence": self.sequence,
                                  "source_port": self.source_port, "source_sequence": self.source_sequence,
                                  "market_time": clock_text(virtual), "actual_speed": self.actual_speed,

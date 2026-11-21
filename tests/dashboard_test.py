@@ -30,7 +30,7 @@ def at(data, nanos):
     return data
 
 
-def capture_frames(symbol=b"ASELS.E", port=PORT):
+def capture_frames(symbol=b"ASELS.E", port=PORT, *, move_midpoint=False):
     epoch = (SECOND + 2) * 1_000_000_000
     events = [seconds(), system_event(b"O"), directory(BOOK, symbol), tick_size(BOOK), phase(b"P_ARA"),
               struct.pack("!cI", b"T", SECOND + 2), phase(b"P_SUREKLI_ISLEM"),
@@ -42,8 +42,10 @@ def capture_frames(symbol=b"ASELS.E", port=PORT):
               at(execute(BOOK, b"B", 1, 10, match_id=101), 6_000_000),
               at(execute(BOOK, b"S", 2, 10, match_id=102), 6_000_000),
               at(execute(BOOK, b"B", 3, 15, match_id=103), 7_000_000),
-              at(execute(BOOK, b"S", 4, 15, match_id=104), 7_000_000),
-              at(system_event(b"C"), 8_000_000)]
+              at(execute(BOOK, b"S", 4, 15, match_id=104), 7_000_000)]
+    if move_midpoint:
+        events.append(at(add(BOOK, b"S", 8, 10050, epoch + 8_500_000, 1), 8_500_000))
+    events.append(at(system_event(b"C"), 9_000_000 if move_midpoint else 8_000_000))
     return [udp_frame(mold(1, events), port=port), udp_frame(mold(len(events) + 1, count=0xFFFF), port=port)]
 
 

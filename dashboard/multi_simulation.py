@@ -1,8 +1,10 @@
 """Route ordered ITCH rows to independent equity simulations."""
 
 from collections.abc import Callable, Mapping
+from fractions import Fraction
 from heapq import heapify, heappop, heappush
 
+from .portfolio_risk import price_shock
 from .simulation import Simulation, canonical_symbol
 from .strategy_api import Strategy, StrategyError
 
@@ -159,5 +161,11 @@ class MultiSimulation:
     def snapshot_all(self) -> dict[str, dict]:
         return {symbol: simulation.snapshot() for symbol, simulation in self._simulations.items()}
 
+    def strategy_diagnostics(self, symbol: str) -> dict | None:
+        return self._simulations[canonical_symbol(symbol)].strategy_diagnostics()
+
     def summaries(self) -> list[dict]:
         return [simulation.summary() for simulation in self._simulations.values()]
+
+    def price_shock(self, percent: Fraction) -> dict:
+        return price_shock((simulation.marked_position() for simulation in self._simulations.values()), percent)

@@ -120,6 +120,21 @@ input::placeholder { color: var(--quiet); }
 .focus-instrument { background: transparent; border: 1px solid transparent; border-radius: 4px; color: var(--text); padding: 3px 5px; font-size: 12px; font-weight: 650; }
 .focus-instrument:hover:not(:disabled), .focus-instrument[aria-pressed='true'] { color: var(--mint); border-color: #2b5958; }
 
+.risk-panel { margin-top: 12px; }
+.risk-panel .section-head { flex-wrap: wrap; }
+.risk-applied { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.risk-form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.risk-form .field { width: 118px; }
+.risk-form input { font-variant-numeric: tabular-nums; }
+.risk-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(152px, 100%), 1fr)); gap: 7px; margin: 12px 0 0; }
+.risk-metrics > div { min-width: 0; padding: 8px 10px; border: 1px solid var(--edge-soft); border-radius: 6px; background: var(--control); }
+.risk-metrics dt { color: var(--muted); font-size: 11px; }
+.risk-metrics dd { margin: 3px 0 0; font-size: 16px; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.risk-status { margin-top: 8px; color: var(--warning); font-size: 11px; overflow-wrap: anywhere; }
+.risk-details { margin-top: 9px; }
+.risk-details summary { width: fit-content; color: var(--muted); font-size: 12px; cursor: pointer; }
+.risk-details summary:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+
 .stats { display: grid; grid-template-columns: 1.16fr 1fr 1fr 1fr 1fr; gap: 9px; margin-top: 12px; }
 .kpi { padding: 13px 13px 11px; background: linear-gradient(155deg, #142130 0%, var(--panel) 80%); }
 .kpi h2 { font-size: 11px; color: var(--muted); letter-spacing: 0; font-weight: 580; min-height: 17px; }
@@ -194,6 +209,15 @@ input::placeholder { color: var(--quiet); }
 .checkbox-field input { accent-color: var(--mint); display: block; width: 16px; height: 16px; margin: 9px 0; }
 .config-form select:disabled, .config-form input:disabled { opacity: .63; }
 .config-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.learning-details { margin-top: 12px; border-top: 1px solid var(--edge-soft); padding-top: 10px; }
+.learning-details summary { width: fit-content; color: var(--muted); font-size: 12px; cursor: pointer; }
+.learning-details summary:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+.learning-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr)); gap: 8px 11px; margin: 9px 0 0; }
+.learning-grid > div { min-width: 0; }
+.learning-grid dt, .learning-empty { color: var(--muted); font-size: 11px; }
+.learning-grid dd { margin: 3px 0 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.learning-update { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--edge-soft); }
+.learning-update h3 { margin: 0; font-size: 12px; font-weight: 620; }
 .journal-table-wrap { overflow: auto; max-height: 285px; margin-top: 8px; }
 .journal-table th { position: sticky; top: 0; background: var(--panel); }
 .journal-table th, .journal-table td { min-width: 56px; }

@@ -49,6 +49,12 @@ if(BUILD_TESTING)
         add_test(NAME multi_simulation COMMAND
             "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_multi_simulation.py)
         set_tests_properties(multi_simulation PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME portfolio_risk COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_portfolio_risk.py)
+        set_tests_properties(portfolio_risk PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME learning_quote COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_learning_quote.py)
+        set_tests_properties(learning_quote PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     else()
         message(STATUS "Python 3 unavailable. Skipping the replay integration test.")
     endif()

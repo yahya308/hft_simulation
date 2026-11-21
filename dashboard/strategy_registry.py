@@ -8,11 +8,13 @@ from re import fullmatch
 from types import MappingProxyType
 
 from .strategies.bid_only import BidOnly
+from .strategies.learning_quote import LearningQuote
 from .strategies.two_sided import TwoSidedQuote
 from .strategy_api import API_VERSION, Strategy
 
 
 DEFAULT_STRATEGY = "two_sided_quote"
+LEARNING_QUOTE_STRATEGY = "learning_quote"
 MAX_JSON_INTEGER = 2**53 - 1
 
 
@@ -159,6 +161,23 @@ def load_registry(module_names=()):
         StrategyDefinition("bid_only", "1.0.0", API_VERSION, "Tek taraflı alış",
                            "En iyi alış kademesini izler ve alım koşulu bozulduğunda emrini iptal eder.",
                            {"quantity": quantity, "decision_interval_ms": interval}, BidOnly),
+        StrategyDefinition(
+            LEARNING_QUOTE_STRATEGY, "1.0.0", API_VERSION, "Öğrenen çift taraflı kotasyon",
+            "Tarihsel alış ve satış dengesinden bir sonraki fiyat hareketinin yönünü öğrenir.",
+            {
+                "quantity": quantity,
+                "quote_interval_ms": interval,
+                "spread_ticks": spread,
+                "learning_rate": Parameter("number", "Öğrenme hızı",
+                                           "Gözlenen her fiyat hareketinde ağırlık güncellemesinin büyüklüğü.",
+                                           0.1, 0.0001, 1),
+                "signal_threshold": Parameter("number", "Sinyal eşiği",
+                                              "Kotasyonu kaydırmak için gereken yön olasılığı. 0,55 yüzde 55 demektir.",
+                                              0.55, 0.5, 1),
+                "minimum_samples": Parameter("integer", "Asgari öğrenme örneği",
+                                             "Yön sinyali kotasyon mesafesine yansımadan önce gereken fiyat hareketi sayısı.",
+                                             20, 0, 1_000_000, "örnek"),
+            }, LearningQuote),
     ]
     for name in module_names:
         try:

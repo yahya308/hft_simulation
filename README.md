@@ -31,14 +31,62 @@ python -B -m dashboard
 1. **PCAP kaydı** alanından dosyayı seç ve **Hisseleri listele** düğmesine bas. `20260522.pcap` için hedef `233.113.216.71`, başlangıç portu `21001`. Bu kayıt için 21001–21004 kanallarındaki açılış referans verisinden uygun paylar listelenir. Bir veya birkaç hisse işaretleyip **Kaydı yükle** düğmesine bas. Seçili hisselerin olayları kanal başına `build/dashboard-cache` içinde önbelleğe alınır.
 2. **Sürekli işleme ilerle**, seçili hisselere ait olayları sırayla uygulayıp odaktaki hisse sürekli işleme geçtiğinde duraklar. **Başlat** ve **Duraklat** ile devam edebilirsin. **Başa al**, seçili hisselerin defterlerini, portföylerini ve emir günlüklerini sıfırlar.
 3. **1×**, bir saniyelik piyasa süresini bir saniyede oynatmayı hedefler. **1–1.000×** bekleme sürelerini ölçekler. **Maks** zaman beklemelerini kaldırır ve hızı bilgisayarın işlem kapasitesi belirler. Her kip aynı olay sırasını kullanır.
-4. **Strateji** bölümünden **Çift taraflı kotasyon** veya **Tek taraflı alış** seç. Stratejinin ayarları ve ortak simülasyon ayarları aynı ekrandan uygulanır. Oynatma başladıktan sonra strateji veya ayar değiştirmek için **Başa al** düğmesini kullan. Stratejiyi açıp kapatma ve hız kontrolü replay sırasında da kullanılabilir. Ekrandaki **i** düğmeleri alanları açıklar.
+4. **Strateji** bölümünden **Çift taraflı kotasyon**, **Öğrenen çift taraflı kotasyon** veya **Tek taraflı alış** seç. Stratejinin ayarları ve ortak simülasyon ayarları aynı ekrandan uygulanır. Oynatma başladıktan sonra strateji veya ayar değiştirmek için **Başa al** düğmesini kullan. Stratejiyi açıp kapatma ve hız kontrolü replay sırasında da kullanılabilir. Ekrandaki **i** düğmeleri alanları açıklar.
 5. **Oturumdaki hisseler** tablosu her hissenin pozisyonunu, kâr/zararını ve gerçekleşmelerini gösterir. Hisse adına tıklayarak defteri, grafiği ve emir günlüğünü o hisseye odaklayabilirsin. Odak değişirken diğer hisseler aynı replay’de işlemeye devam eder. **Emir defteri** bölümünde **Simüle** veya **Tarihsel ITCH** görünümü seçilebilir.
 
 Her kanalın MoldUDP64 sırası ayrı doğrulanır. Birden fazla kanal seçildiğinde olaylar borsa zamanı ile birleştirilir. Eşit zaman damgasında önce UDP portu, sonra kaynak Mold sırası kullanılır. Strateji ayarları ortak uygulanır. Pozisyon limiti ve emirler hisse bazındadır.
 
+### Portföy fiyat duyarlılığı ve stres testi
+
+Dashboard’daki **Portföy fiyat şoku** bölümünde seçili bütün hisselerin referans fiyatına aynı yüzde değişimi uygulayabilirsin. Örneğin `-1` girildiğinde her fiyat %1 azaltılarak portföy yeniden değerlenir. Panel hisse başına etkiyi, mevcut toplam kâr/zararı ve şok sonrası toplamı gösterir. Hesap aynı replay anındaki nakit ve pozisyonlarla yapılır. Referans fiyat, tarihsel ITCH defterinin son geçerli orta fiyatıdır.
+
+$Q_i$ işaretli hisse adedi, $C_i$ simüle nakit bakiyesi, $m_i$ referans fiyat olsun. Portföy kâr/zararı ve fiyatlara göre kısmi türevi şöyledir.
+
+$$
+\Pi(\mathbf{m})=\sum_i(C_i+Q_i m_i),
+\qquad
+\frac{\partial\Pi}{\partial m_i}=Q_i,
+\qquad
+\nabla_{\mathbf{m}}\Pi=(Q_1,\ldots,Q_n).
+$$
+
+Ortak yüzde şoku $s$ ile yeni fiyat $m_i(s)=m_i(1+s/100)$ olur. Zincir kuralı, bir yüzde puanı başına portföy duyarlılığını verir.
+
+$$
+\frac{d\Pi}{ds}
+=\sum_i\frac{\partial\Pi}{\partial m_i}\frac{dm_i(s)}{ds}
+=\sum_i\frac{Q_i m_i}{100},
+\qquad
+\Delta\Pi=s\sum_i\frac{Q_i m_i}{100}.
+$$
+
+Pozisyon sabitken duyarlılık şok boyunca değişmez. Bu nedenle hesap bu senaryo için tam yeniden değerlemeyle eşleşir. Açık bir pozisyonun referans fiyatı eksikse portföy toplamı ve şok etkisi panelde boş bırakılır.
+
+Örneğin ASELS’te −15 pay, referans 410,125 ₺ ve THYAO’da +100 pay, referans 288,125 ₺ iken ortak **−%1** şok ASELS’te **+61,51875 ₺**, THYAO’da **−288,125 ₺** etki verir. Toplam etki **−226,60625 ₺** olur. Başlangıç kâr/zararı −1.440,375 ₺ ise şok sonrası sonuç −1.666,98125 ₺’dir. [Stres hesabı](dashboard/portfolio_risk.py) · [Türev ve yeniden değerleme testleri](tests/test_portfolio_risk.py)
+
 ### Test stratejisi ve OUCH
 
 Strateji, seçili payların sürekli işlem fazında en iyi alış ve satış kademelerine iki pasif Day limit emir verir. Fiyatlar değiştiğinde kotasyonları OUCH `Replace` ile günceller. Yerel motor ikili SoupBinTCP veri çerçeveleri içinde `Enter`, `Replace`, `Cancel` isteklerini ve kabul, ret, iptal ve gerçekleşme yanıtlarını işler. Emir günlüğündeki mesaj bilgisinden token, istek/yanıt sırası ve ikili çerçeve görülebilir. Aynı sanal zaman damgasındaki tarihsel ITCH olayı, simüle emir varışından önce işlenir. Ağ üzerinden OUCH oturumu açma ve Mass Quote sonraki protokol kapsamıdır. [BISTECH OUCH](https://borsaistanbul.com/files/bistech-ouch-protocol-specification-sr-3-12.pdf)
+
+### Öğrenen çift taraflı kotasyon
+
+Strateji, tarihsel ITCH defterindeki en iyi alış ve satış kademelerinin lot toplamlarından emir dengesizliğini hesaplar. Alış lotu $B$, satış lotu $A$ olmak üzere $I=(B-A)/(B+A)$. Her yeni orta fiyat seviyesindeki ilk geçerli dengesizliği ve modelin o andaki tahminini saklar. Orta fiyat bir sonraki kez değiştiğinde saklanan örneği yukarı hareket için $y=1$, aşağı hareket için $y=0$ ile etiketler. Defter geçersiz hale gelirse veya piyasa evresi değişirse bekleyen örnek silinir.
+
+Model, $z=w_0+w_1 I$ ve $p=\sigma(z)=1/(1+e^{-z})$ ile bir sonraki orta fiyat hareketinin yukarı yönlü olma olasılığını tahmin eder. Lojistik kayıp $L=-y\log p-(1-y)\log(1-p)$ için zincir kuralı şu gradyanı verir.
+
+$$
+\frac{\partial L}{\partial w_j}
+=\frac{\partial L}{\partial p}\frac{\partial p}{\partial z}\frac{\partial z}{\partial w_j}
+=(p-y)x_j,\qquad
+(x_0,x_1)=(1,I),\qquad
+w_j\leftarrow w_j-\eta(p-y)x_j.
+$$
+
+Örneğin en iyi alışta 800, satışta 200 lot varsa $I=0{,}6$ olur. Model sıfır ağırlıkla %50 tahmin yapar. Sonraki orta fiyat yükselirse $y=1$ olur ve gradyan $(-0{,}5,\,-0{,}3)$ çıkar. Öğrenme hızı $\eta=0{,}1$ ile ağırlıklar $(0{,}05,\,0{,}03)$ olur. Aynı defter dengesi tekrar görülürse yükseliş tahmini yaklaşık %51,7’ye çıkar.
+
+Varsayılan ayarla model, 20 etiketli örnekten sonra kotasyona etki eder. Yukarı hareket tahmini en az %55 ise satış kotasyonu bir ek kademe yukarı, en fazla %45 ise alış kotasyonu bir ek kademe aşağı alınır. Kotasyonlar simüle defterin en iyi kademelerini temel alır ve aynı OUCH ve fiyat-zaman motorundan geçer. Model her hisse için ayrı öğrenir ve her yeni replay koşusuna sıfır ağırlıkla başlar.
+
+Stratejiyi seçip ayarları uyguladıktan sonra **Öğrenme ayrıntıları** bölümünde anlık tahmini, son eğitim örneğinin etiketini, gradyanını, güncelleme öncesi ve sonrası ağırlıklarını ve son kotasyon kararının kademe uzaklıklarını görebilirsin. [Strateji kodu](dashboard/strategies/learning_quote.py) · [Emir dengesizliği ve orta fiyat çalışması](https://arxiv.org/abs/1512.03492)
 
 ### Fiyat-zaman önceliğiyle gerçekleşme
 

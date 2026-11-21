@@ -3,6 +3,9 @@
 const el = id => document.getElementById(id);
 const tr = new Intl.NumberFormat("tr-TR", {maximumFractionDigits: 2});
 const prices = new Intl.NumberFormat("tr-TR", {minimumFractionDigits: 2, maximumFractionDigits: 3});
+const riskPercent = new Intl.NumberFormat("tr-TR", {maximumFractionDigits: 20});
+const probability = new Intl.NumberFormat("tr-TR", {style: "percent", maximumFractionDigits: 2});
+const learningNumber = new Intl.NumberFormat("tr-TR", {maximumFractionDigits: 6});
 const phases = {idle: "Bekliyor", preparing: "Hazırlanıyor", ready: "Hazır", running: "Oynatılıyor",
     paused: "Duraklatıldı", finished: "Tamamlandı", error: "Replay durdu"};
 const marketPhases = {P_SUREKLI_ISLEM: "Sürekli işlem", P_GUNSONU: "Gün sonu", P_MARJ_YAYIN: "Marj yayını",
@@ -19,6 +22,7 @@ let strategyCatalog = null, strategyListPending = false, strategyListError = "",
 let parameterKey, parameterFields = new Map();
 let catalogKey, resultsKey, resultsSearch, chipsKey, clusterKey, previousFocus;
 let availableSymbols = [], selectedSymbols = new Set(), instrumentRows = new Map();
+let riskChanged = false, riskRowsKey;
 
 function format(value, formatter = tr) {
     return typeof value === "number" && Number.isFinite(value) ? formatter.format(value) : "—";
@@ -407,6 +411,47 @@ function renderInstruments() {
     }
 }
 
+function renderRiskRows() {
+    if (!el("risk-details").open) return;
+    const rows = state.risk?.rows || [];
+    const key = JSON.stringify(rows);
+    if (key === riskRowsKey) return;
+    riskRowsKey = key;
+    const body = el("risk-rows");
+    body.replaceChildren();
+    for (const impact of rows) {
+        const row = body.insertRow();
+        cell(row, impact.symbol);
+        cell(row, lira(impact.mark_price));
+        for (const amount of [impact.sensitivity_per_lira, impact.sensitivity_per_percent, impact.pnl_change]) {
+            cell(row, lira(amount), amount > 0 ? "positive" : amount < 0 ? "negative" : "");
+        }
+    }
+}
+
+function renderRisk() {
+    const risk = state.risk;
+    const panel = el("risk-panel");
+    panel.hidden = !risk || ["idle", "preparing"].includes(state.phase);
+    if (panel.hidden) return;
+
+    const input = el("risk-shock");
+    if (!riskChanged && input.valueAsNumber !== risk.shock_percent) input.value = risk.shock_percent;
+    input.disabled = requestPending;
+    el("risk-apply").disabled = requestPending || !riskChanged;
+    value("risk-applied-shock", `Uygulanan şok %${format(risk.shock_percent, riskPercent)}`);
+    balance("risk-base-pnl", risk.base_pnl);
+    balance("risk-sensitivity", risk.sensitivity_per_percent);
+    balance("risk-pnl-change", risk.pnl_change);
+    balance("risk-stressed-pnl", risk.stressed_pnl);
+
+    const missing = risk.missing_marks || [];
+    value("risk-status", missing.length ? `Açık pozisyon için referans fiyat bekleniyor (${missing.join(", ")}).` : "");
+    el("risk-status").hidden = !missing.length;
+    el("risk-details").hidden = !risk.rows?.length;
+    renderRiskRows();
+}
+
 function findStrategy(id) {
     return strategyCatalog?.strategies.find(item => item.id === id);
 }
@@ -507,6 +552,31 @@ function renderStrategySettings() {
     el("strategy-feedback").classList.toggle("negative", Boolean(strategyListError || strategyError || runErrorContext));
 }
 
+function renderLearning() {
+    const details = el("learning-details");
+    const diagnostics = state.strategy_diagnostics;
+    details.hidden = state.strategy_selection?.id !== "learning_quote" || !diagnostics;
+    if (details.hidden) return;
+
+    value("learning-probability", format(diagnostics.probability_up, probability));
+    value("learning-imbalance", format(diagnostics.imbalance, learningNumber));
+    value("learning-samples", format(diagnostics.samples));
+    value("learning-offsets", `${format(diagnostics.bid_offset_ticks)} / ${format(diagnostics.ask_offset_ticks)}`);
+
+    const update = diagnostics.last_update;
+    el("learning-update").hidden = !update;
+    el("learning-empty").hidden = Boolean(update);
+    if (!update) return;
+    value("learning-direction", update.label === 1 ? "Yukarı" : update.label === 0 ? "Aşağı" : "—");
+    value("learning-forecast", format(update.forecast, probability));
+    value("learning-training-imbalance", format(update.training_imbalance, learningNumber));
+    value("learning-bias-gradient", format(update.gradient?.bias, learningNumber));
+    value("learning-gradient", format(update.gradient?.imbalance, learningNumber));
+    value("learning-bias-weight", `${format(update.weights_before?.bias, learningNumber)} → ${format(update.weights_after?.bias, learningNumber)}`);
+    value("learning-weight", `${format(update.weights_before?.imbalance, learningNumber)} → ${format(update.weights_after?.imbalance, learningNumber)}`);
+    value("learning-sequence", format(update.sequence));
+}
+
 async function loadStrategies() {
     if (strategyListPending) return;
     strategyListPending = true;
@@ -559,10 +629,12 @@ function render(next) {
     el("advance-open").disabled = !["ready", "paused"].includes(phase) || state.market_phase === "P_SUREKLI_ISLEM" || requestPending || (phase === "ready" && settingsChanged);
     renderSymbolPicker();
     renderInstruments();
+    renderRisk();
     el("strategy-toggle").checked = Boolean(state.strategy_enabled);
     el("strategy-toggle").disabled = requestPending;
     value("strategy-status", state.strategy_enabled ? "Açık" : "Kapalı");
     renderStrategySettings();
+    renderLearning();
     for (const button of document.querySelectorAll("[data-speed]")) button.setAttribute("aria-pressed", String(String(state.speed) === button.dataset.speed));
     if (state.speed !== "max" && !speedChanged) el("custom-speed").value = state.speed;
     const error = actionError || state.error;
@@ -613,6 +685,7 @@ async function control(message) {
     renderStrategySettings();
     renderSymbolPicker();
     renderInstruments();
+    renderRisk();
     try {
         const response = await fetch("/api/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(message)});
         const data = await response.json();
@@ -623,6 +696,7 @@ async function control(message) {
             strategyError = "";
         }
         if (message.action === "speed") speedChanged = false;
+        if (message.action === "risk_shock") riskChanged = false;
         requestPending = false;
         render(data);
     } catch (error) {
@@ -668,6 +742,17 @@ el("instrument-rows").addEventListener("click", event => {
     const button = event.target.closest("[data-symbol]");
     if (button && button.dataset.symbol !== state.focus_symbol) control({action: "focus_instrument", symbol: button.dataset.symbol});
 });
+el("risk-shock").addEventListener("input", () => {
+    riskChanged = el("risk-shock").valueAsNumber !== state.risk?.shock_percent;
+    renderRisk();
+});
+el("risk-form").addEventListener("submit", event => {
+    event.preventDefault();
+    if (!el("risk-apply").disabled && event.currentTarget.reportValidity()) {
+        control({action: "risk_shock", percent: el("risk-shock").valueAsNumber});
+    }
+});
+el("risk-details").addEventListener("toggle", renderRiskRows);
 for (const action of ["start", "pause", "reset"]) el(action).addEventListener("click", () => control({action}));
 el("advance-open").addEventListener("click", () => control({action: "advance_open"}));
 el("book-depth").addEventListener("change", bookRows);

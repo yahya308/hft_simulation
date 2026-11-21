@@ -65,7 +65,7 @@ class OrderUpdate:
 
 @dataclass(frozen=True, slots=True)
 class StrategyView:
-    """Instrument, visible best prices, and the strategy's own state."""
+    """Instrument, shadow and historical best prices, and the strategy's own state."""
 
     symbol: str
     phase: str
@@ -84,6 +84,10 @@ class StrategyView:
     pending_sides: tuple[Side, ...]
     generation: int
     tick_bands: tuple[TickBand, ...]
+    reference_best_bid: int | None = None
+    reference_best_ask: int | None = None
+    reference_best_bid_quantity: int = 0
+    reference_best_ask_quantity: int = 0
 
     def order(self, side: Side) -> OpenOrder | None:
         return next((order for order in self.orders if order.side == side), None)

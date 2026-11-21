@@ -84,6 +84,38 @@
             </table></div>
         </section>
 
+        <section class="panel risk-panel" id="risk-panel" aria-labelledby="risk-title" hidden>
+            <div class="section-head">
+                <div>
+                    <h2 id="risk-title">Portföy fiyat şoku <span class="help" data-help="Tüm seçili hisselerin referans fiyatı aynı oranda değişirse mevcut portföyün kâr veya zararının nasıl değişeceğini hesaplar. Pozisyonlar ve gerçekleşen kâr/zarar sabit tutulur."></span></h2>
+                    <p class="risk-applied" id="risk-applied-shock"></p>
+                </div>
+                <form class="risk-form" id="risk-form">
+                    <div class="field">
+                        <span class="field-label"><label for="risk-shock">Fiyat değişimi (%)</label><span class="help" data-help="Örneğin −1 girersen her referans fiyat %1 azaltılır. Aralık −100 ile 100 arasındadır."></span></span>
+                        <input id="risk-shock" type="number" min="-100" max="100" step="any" value="-1" required>
+                    </div>
+                    <button class="button secondary" id="risk-apply" type="submit" disabled>Şoku uygula</button>
+                </form>
+            </div>
+            <dl class="risk-metrics" aria-label="Portföy şok sonuçları">
+                <div><dt>Mevcut portföy K/Z <span class="help" data-help="Seçili hisselerin simüle nakdi ve açık pozisyonlarının referans fiyatlarla hesaplanan net değeri."></span></dt><dd id="risk-base-pnl">—</dd></div>
+                <div><dt>1 yüzde puan etkisi <span class="help" data-help="Fiyat değişimi yüzdesi 1 puan artarsa portföy kâr/zararındaki değişim. Hisse başına net pozisyon × referans fiyat / 100 değerleri toplanır."></span></dt><dd id="risk-sensitivity">—</dd></div>
+                <div><dt>Şokun K/Z etkisi <span class="help" data-help="Uygulanan yüzde değişiminin portföy kâr/zararına TL cinsinden etkisi."></span></dt><dd id="risk-pnl-change">—</dd></div>
+                <div><dt>Şok sonrası K/Z <span class="help" data-help="Mevcut portföy kâr/zararı ile fiyat şokunun etkisinin toplamı."></span></dt><dd id="risk-stressed-pnl">—</dd></div>
+            </dl>
+            <p class="risk-status" id="risk-status" role="status" hidden></p>
+            <details class="risk-details" id="risk-details">
+                <summary>Hisse bazında duyarlılık</summary>
+                <div class="instruments-table-wrap">
+                    <table class="instruments-table" aria-label="Hisse bazında fiyat duyarlılıkları">
+                        <thead><tr><th scope="col">Hisse</th><th scope="col">Referans fiyat <span class="help" data-help="Tarihsel ITCH defterindeki son geçerli alış ve satış fiyatlarının ortalaması."></span></th><th scope="col">1 TL fiyat artışının etkisi <span class="help" data-help="Hissenin kâr/zarar fonksiyonunun kendi referans fiyatına göre kısmi türevi, net pay pozisyonuna eşittir."></span></th><th scope="col">1 yüzde puan etkisi <span class="help" data-help="Bu hissedeki yüzde değişim 1 puan arttığında portföy kâr/zararına etkisi."></span></th><th scope="col">Şok katkısı <span class="help" data-help="Uygulanan şok altında bu hissenin portföy kâr/zararındaki toplam değişime katkısı."></span></th></tr></thead>
+                        <tbody id="risk-rows"></tbody>
+                    </table>
+                </div>
+            </details>
+        </section>
+
         <section class="stats" aria-label="Strateji göstergeleri">
             <article class="kpi pnl-kpi"><h2>Toplam kâr / zarar <span class="help" data-help="Net gerçekleşen kâr/zarar ile eldeki pozisyonun gerçekleşmemiş kâr/zararının toplamı."></span></h2><strong id="total-pnl">—</strong><div class="kpi-detail">Gerçekleşen <span id="realized-pnl">—</span><span class="help" data-help="Kapanan işlemlerden oluşan net kâr/zarar. Simülasyonda tanımlı işlem ücretleri hesaba katılır."></span></div></article>
             <article class="kpi"><h2>Hisse miktarı <span class="help" data-help="Görüntülenen hissenin net strateji pozisyonu. Pozitif değer eldeki hisseyi, negatif değer sanal kısa pozisyonu gösterir."></span></h2><strong id="inventory">—</strong><div class="kpi-detail">Gerçekleşmemiş <span id="unrealized-pnl">—</span><span class="help" data-help="Açık pozisyon, tarihsel ITCH defterindeki son geçerli orta fiyatla değerlenir. Bu fiyat, en iyi alış ve satışın ortalamasıdır."></span></div></article>
@@ -159,6 +191,29 @@
                         <button type="button" class="button secondary" id="retry-strategies" hidden>Listeyi yeniden yükle</button>
                     </div>
                 </form>
+                <details class="learning-details" id="learning-details" hidden>
+                    <summary>Öğrenme ayrıntıları</summary>
+                    <dl class="learning-grid">
+                        <div><dt>Yükseliş olasılığı <span class="help" data-help="Modelin bir sonraki tarihsel orta fiyat değişiminin yukarı yönlü olacağına dair tahmini."></span></dt><dd id="learning-probability">—</dd></div>
+                        <div><dt>Defter dengesi <span class="help" data-help="Tarihsel en iyi alış ve satış miktarlarının farkının toplamlarına oranı. Pozitif değer alış tarafının daha kalabalık olduğunu gösterir."></span></dt><dd id="learning-imbalance">—</dd></div>
+                        <div><dt>Sonuçlanan tahmin <span class="help" data-help="Tarihsel orta fiyat değiştiğinde yönü belirlenmiş ve model güncellemesinde kullanılan tahmin sayısı."></span></dt><dd id="learning-samples">—</dd></div>
+                        <div><dt>Alış / satış mesafesi <span class="help" data-help="Son kotasyon kararında alış ve satış için seçilen uzaklıklar, fiyat adımı cinsinden."></span></dt><dd id="learning-offsets">—</dd></div>
+                    </dl>
+                    <p class="learning-empty" id="learning-empty">Model, ilk tarihsel fiyat değişimini bekliyor.</p>
+                    <div class="learning-update" id="learning-update" hidden>
+                        <h3>Son ağırlık güncellemesi</h3>
+                        <dl class="learning-grid">
+                            <div><dt>Gözlenen yön <span class="help" data-help="Sıradaki tarihsel orta fiyatın değişim yönü. Yukarı 1, aşağı 0 olarak işlenir."></span></dt><dd id="learning-direction">—</dd></div>
+                            <div><dt>Önceki yükseliş tahmini <span class="help" data-help="Sonuçlanan tahminin, fiyat hareketi gözlenmeden önce hesaplanan yükseliş olasılığı."></span></dt><dd id="learning-forecast">—</dd></div>
+                            <div><dt>Tahmin anındaki denge <span class="help" data-help="Sonuçlanan tahminde kullanılan tarihsel defter dengesi."></span></dt><dd id="learning-training-imbalance">—</dd></div>
+                            <div><dt>Sabit terimin kısmi türevi <span class="help" data-help="Yükseliş tahmini eksi gözlenen yön. Yön yukarı için 1, aşağı için 0 alınır."></span></dt><dd id="learning-bias-gradient">—</dd></div>
+                            <div><dt>Denge ağırlığının kısmi türevi <span class="help" data-help="Zincir kuralıyla hesaplanır. Tahmin ile gözlenen yön arasındaki fark, tahmin anındaki defter dengesiyle çarpılır."></span></dt><dd id="learning-gradient">—</dd></div>
+                            <div><dt>Sabit terim <span class="help" data-help="Defter dengesi sıfırken modelin dayandığı terim. Öğrenme hızı ile kısmi türevin çarpımı önceki değerden çıkarılır."></span></dt><dd id="learning-bias-weight">—</dd></div>
+                            <div><dt>Denge ağırlığı <span class="help" data-help="Önceki ağırlıktan öğrenme hızı ile gradyanın çarpımı çıkarılır."></span></dt><dd id="learning-weight">—</dd></div>
+                            <div><dt>Replay sırası <span class="help" data-help="Fiyat hareketinin gözlendiği ve ağırlıkların güncellendiği olayın sıra numarası."></span></dt><dd id="learning-sequence">—</dd></div>
+                        </dl>
+                    </div>
+                </details>
             </section>
             <section class="panel journal-panel" aria-labelledby="journal-title">
                 <div class="section-head"><h2 id="journal-title">OUCH emir günlüğü <span class="help" data-help="Stratejinin yerel OUCH emirlerinin ve motor yanıtlarının kronolojik akışı."></span></h2></div>

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from dashboard_test import PORT, capture
+from dashboard_test import PORT, capture, capture_frames, pcap
 from dashboard.server import Controller, make_server
 from dashboard.strategy_registry import Parameter, StrategyDefinition, load_registry
 
@@ -158,6 +158,20 @@ class StrategyDashboardTests(unittest.TestCase):
         finished = self.wait_for("finished")
         self.assertEqual(finished["strategy"]["inventory"], 3)
         self.assertEqual([(line["type"], line["side"]) for line in finished["journal"]], [("O", "B"), ("A", "B"), ("E", "B")])
+        stress = self.command("risk_shock", percent=-1.25)
+        mark_price = finished["strategy"]["mark_price"]
+        risk = stress["risk"]
+        self.assertEqual(risk["base_pnl"], finished["strategy"]["total_pnl"])
+        self.assertEqual(risk["rows"][0]["mark_price"], mark_price)
+        self.assertEqual(risk["rows"][0]["sensitivity_per_lira"], 3)
+        self.assertAlmostEqual(risk["pnl_change"], 3 * mark_price * (-1.25 / 100))
+        self.assertEqual(stress["journal"], finished["journal"])
+        self.assertEqual(stress["strategy"], finished["strategy"])
+        self.assertEqual(stress["progress"]["sequence"], finished["progress"]["sequence"])
+        with self.assertRaises(HTTPError) as failure:
+            self.command("risk_shock", percent=-101)
+        self.assertEqual(failure.exception.code, 400)
+        self.assertEqual(self.request("/api/state")["risk"], risk)
         self.command("reset")
         self.command("speed", value=1000)
         self.command("start")
@@ -195,6 +209,31 @@ class StrategyDashboardTests(unittest.TestCase):
         self.command("select_strategy", strategy_id=PLUGIN_ID, params={"quantity": 3})
         self.command("start")
         self.assertEqual(self.wait_for("finished")["strategy"]["inventory"], 3)
+
+    def test_learning_strategy_is_optional_and_reports_causal_updates(self):
+        catalog = self.request("/api/strategies")
+        self.assertEqual(catalog["default_strategy_id"], "two_sided_quote")
+        self.assertIn("learning_quote", {entry["id"] for entry in catalog["strategies"]})
+        self.assertIsNone(self.request("/api/state")["strategy_diagnostics"])
+        (self.controller.root / "learning.pcap").write_bytes(pcap(capture_frames(move_midpoint=True)))
+        params = {"minimum_samples": 1, "signal_threshold": 0.51, "quote_interval_ms": 1}
+        selected = self.command("select_strategy", strategy_id="learning_quote", params=params)
+        self.assertEqual(selected["strategy_diagnostics"]["samples"], 0)
+        self.command("load", file="learning.pcap", host="239.1.2.3", port=PORT)
+        self.wait_for("ready")
+        self.command("speed", value="max")
+        self.command("start")
+        finished = self.wait_for("finished")
+        self.assertEqual(finished["strategy_diagnostics"]["samples"], 1)
+        self.assertEqual(finished["strategy_diagnostics"]["last_update"]["label"], 0)
+        self.assertEqual(finished["strategy_diagnostics"]["bid_offset_ticks"], 1)
+        self.command("reset")
+        self.assertEqual(self.request("/api/state")["strategy_diagnostics"]["samples"], 0)
+        self.command("speed", value=1000)
+        self.command("start")
+        replayed = self.wait_for("finished")
+        self.assertEqual(replayed["strategy_diagnostics"], finished["strategy_diagnostics"])
+        self.assertEqual(replayed["journal"], finished["journal"])
 
 
 if __name__ == "__main__":

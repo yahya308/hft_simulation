@@ -8,6 +8,7 @@ from heapq import heapify, heappop, heappush
 from math import isfinite
 
 from .ouch import Command, Reply, decode_command, decode_reply, encode_command, encode_reply
+from .portfolio_risk import MarkedPosition
 from .strategies.two_sided import TwoSidedQuote
 from .strategy_api import (Cancel, Enter, MarketEvent, OpenOrder, OrderIntent, OrderUpdate,
                            Replace, Strategy, StrategyError, StrategyView, tick_band, valid_price)
@@ -384,7 +385,8 @@ class Simulation:
     def _capacity(self, side: str) -> int:
         return self.config["max_position"] + self._book[side].sign * self._portfolio.position
 
-    def _strategy_view(self, bid: int | None, ask: int | None) -> StrategyView:
+    def _strategy_view(self, bid: int | None, ask: int | None,
+                       reference_bid: int | None, reference_ask: int | None) -> StrategyView:
         orders = tuple(OpenOrder(quote.order_id, quote.side, quote.price, quote.remaining, quote.executed)
                        for quote in self._quotes.values())
         return StrategyView(
@@ -394,15 +396,19 @@ class Simulation:
             self.price_decimals, self.round_lot, self._portfolio.position,
             max(0, self._capacity("B")), max(0, self._capacity("S")),
             orders, tuple(self._pending), self._generation, self._tick_bands,
+            reference_bid, reference_ask,
+            self._reference_book["B"].levels[reference_bid].quantity if reference_bid is not None else 0,
+            self._reference_book["S"].levels[reference_ask].quantity if reference_ask is not None else 0,
         )
 
-    def _decide(self, kind: str, args: list, bid: int | None, ask: int | None) -> None:
+    def _decide(self, kind: str, args: list, bid: int | None, ask: int | None,
+                reference_bid: int | None, reference_ask: int | None) -> None:
         if not self._active() or (self._coalesced_quotes and
                                   not self._strategy._due(self.exchange_ns, self._generation)):
             return
         event = MarketEvent(kind, self.sequence, self.exchange_ns, tuple(args),
                             self._source_port, self._source_sequence)
-        view = self._strategy_view(bid, ask)
+        view = self._strategy_view(bid, ask, reference_bid, reference_ask)
         updates = tuple(self._updates) if self._updates else ()
         if self._updates is not None:
             self._updates.clear()
@@ -809,7 +815,7 @@ class Simulation:
             self._last_mark = Fraction(reference_bid + reference_ask, 2)
         bid, ask, can_decide = self._shadow_bbo(reference_bid, reference_ask)
         if can_decide:
-            self._decide(kind, args, bid, ask)
+            self._decide(kind, args, bid, ask, reference_bid, reference_ask)
 
     def _levels(self, book: BookSide, quote: Quote | None = None) -> list[dict]:
         rows = []
@@ -834,6 +840,10 @@ class Simulation:
         portfolio = self._portfolio
         return (self._last_mark - portfolio.average) * portfolio.position if self._last_mark is not None else 0
 
+    def marked_position(self) -> MarkedPosition:
+        mark = self._last_mark / self._scale if self._last_mark is not None else None
+        return MarkedPosition(self.symbol, self._portfolio.position, mark, self._portfolio.cash / self._scale)
+
     @staticmethod
     def _midpoint(bid: int | None, ask: int | None) -> Fraction | None:
         return Fraction(bid + ask, 2) if bid is not None and ask is not None and bid < ask else None
@@ -843,6 +853,10 @@ class Simulation:
         return {"symbol": self.symbol, "book_id": self.book_id, "position": self._portfolio.position,
                 "total_pnl": self._price(self._portfolio.realized + self._unrealized()),
                 "fills": self._fills, "reference_mid_price": self._price(reference_middle)}
+
+    def strategy_diagnostics(self) -> dict | None:
+        diagnostics = getattr(self._strategy, "diagnostics", None)
+        return diagnostics() if callable(diagnostics) else None
 
     def snapshot(self) -> dict:
         buy, sell = self._book["B"], self._book["S"]
