@@ -32,6 +32,142 @@ bool supports_equity(const hft::Directory& directory) {
            directory.round_lot != 0;
 }
 
+struct RecoverySource {
+    fs::path capture;
+    hft::FeedEndpoint endpoint;
+};
+
+struct RecoveryStats {
+    std::uint64_t gaps = 0;
+    std::uint64_t messages = 0;
+};
+
+class RecoveryArchive {
+public:
+    explicit RecoveryArchive(const RecoverySource& source)
+        : endpoint_(source.endpoint), input_(source.capture, std::ios::binary) {
+        if (!input_) {
+            throw std::runtime_error("could not open recovery capture file");
+        }
+        reader_.emplace(input_);
+    }
+
+    const hft::MoldPacket& find(const std::array<std::uint8_t, 10>& session, std::uint64_t sequence) {
+        if (covers(session, sequence)) {
+            return *packet_;
+        }
+        const bool searched_partially = read_any_;
+        if (scan(session, sequence)) {
+            return *packet_;
+        }
+        // A recorded REWINDER reply may precede a reply for a lower sequence.
+        if (searched_partially) {
+            input_.clear();
+            input_.seekg(0);
+            reader_.emplace(input_);
+            packet_.reset();
+            if (scan(session, sequence)) {
+                return *packet_;
+            }
+        }
+        throw std::runtime_error("recovery capture does not contain MoldUDP64 sequence " +
+                                 std::to_string(sequence) + " for the primary session");
+    }
+
+    std::uint64_t capture_ns() const { return udp_.capture_ns; }
+
+private:
+    bool covers(const std::array<std::uint8_t, 10>& session, std::uint64_t sequence) const {
+        return packet_ && packet_->session == session && packet_->kind == hft::MoldKind::data &&
+               packet_->first_sequence <= sequence && sequence - packet_->first_sequence < packet_->message_count;
+    }
+
+    bool scan(const std::array<std::uint8_t, 10>& session, std::uint64_t sequence) {
+        while (reader_->next(endpoint_, udp_)) {
+            read_any_ = true;
+            try {
+                packet_ = hft::parse_mold(udp_.payload);
+            } catch (const std::runtime_error& error) {
+                throw std::runtime_error("recovery packet " + std::to_string(udp_.index) + ": " + error.what());
+            }
+            if (covers(session, sequence)) {
+                return true;
+            }
+        }
+        packet_.reset();
+        return false;
+    }
+
+    hft::FeedEndpoint endpoint_;
+    std::ifstream input_;
+    std::optional<hft::PcapReader> reader_;
+    hft::UdpPacket udp_{};
+    std::optional<hft::MoldPacket> packet_;
+    bool read_any_ = false;
+};
+
+void compare_overlap(const hft::MoldPacket& primary, const hft::MoldPacket& recovered) {
+    const auto start = std::max(primary.first_sequence, recovered.first_sequence);
+    const auto finish = std::min(primary.first_sequence + primary.message_count,
+                                 recovered.first_sequence + recovered.message_count);
+    if (start >= finish) {
+        return;
+    }
+
+    auto primary_blocks = primary.blocks;
+    auto recovered_blocks = recovered.blocks;
+    for (auto sequence = primary.first_sequence; sequence < start; ++sequence) {
+        hft::next_mold_message(primary_blocks);
+    }
+    for (auto sequence = recovered.first_sequence; sequence < start; ++sequence) {
+        hft::next_mold_message(recovered_blocks);
+    }
+    for (auto sequence = start; sequence < finish; ++sequence) {
+        const auto left = hft::next_mold_message(primary_blocks);
+        const auto right = hft::next_mold_message(recovered_blocks);
+        if (!std::ranges::equal(left, right)) {
+            throw std::runtime_error("recovery archive disagrees with primary at sequence " + std::to_string(sequence));
+        }
+    }
+}
+
+template <typename Apply>
+void read_with_recovery(hft::ItchStream& stream, const hft::UdpPacket& packet,
+                        std::optional<std::uint64_t> through_sequence, RecoveryArchive* archive,
+                        RecoveryStats& stats, Apply&& apply) {
+    try {
+        stream.read_packet(packet, through_sequence, apply);
+        return;
+    } catch (const hft::MoldSequenceGap& gap) {
+        ++stats.gaps;
+        try {
+            if (!archive) {
+                throw std::runtime_error(std::string(gap.what()) + ". Supply the archived recovery channel.");
+            }
+            const auto primary = hft::parse_mold(packet.payload);
+            const auto last_missing = gap.received() - 1;
+            const auto target = through_sequence ? std::min(last_missing, *through_sequence) : last_missing;
+            const auto apply_recovered = [&](const hft::ItchMessage& message, std::uint64_t sequence, std::uint64_t time) {
+                apply(message, sequence, time);
+                ++stats.messages;
+            };
+            while (stream.next_sequence() <= target) {
+                const auto& recovered = archive->find(primary.session, stream.next_sequence());
+                compare_overlap(primary, recovered);
+                stream.read_recovered_packet(recovered, archive->capture_ns(), target, apply_recovered);
+            }
+        } catch (const std::runtime_error&) {
+            std::cerr << "COVERAGE\tstatus=unrecoverable_gap\texpected_sequence=" << stream.next_sequence()
+                      << "\treceived_sequence=" << gap.received() << "\tgap_count=" << stats.gaps
+                      << "\trecovered_messages=" << stats.messages << '\n';
+            throw;
+        }
+    }
+    if (!through_sequence || !stream.has_reached(*through_sequence)) {
+        stream.read_packet(packet, through_sequence, apply);
+    }
+}
+
 std::set<std::string> parse_symbols(std::string_view symbols) {
     std::set<std::string> result;
     while (true) {
@@ -262,15 +398,22 @@ private:
 
 void extract(const fs::path& capture, hft::FeedEndpoint endpoint, const fs::path& destination,
              std::optional<std::uint64_t> through_sequence,
-             const std::optional<std::set<std::string>>& symbols) {
-    if (fs::exists(destination) && fs::equivalent(capture, destination)) {
-        throw std::runtime_error("NDJSON output must be different from the input PCAP");
+             const std::optional<std::set<std::string>>& symbols,
+             const std::optional<RecoverySource>& recovery_source) {
+    if (fs::exists(destination) &&
+        (fs::equivalent(capture, destination) ||
+         (recovery_source && fs::equivalent(recovery_source->capture, destination)))) {
+        throw std::runtime_error("NDJSON output must be different from the input PCAP files");
     }
     std::ifstream input(capture, std::ios::binary);
     if (!input) {
         throw std::runtime_error("could not open capture file");
     }
     hft::PcapReader reader(input);
+    std::optional<RecoveryArchive> archive;
+    if (recovery_source) {
+        archive.emplace(*recovery_source);
+    }
     const StagedOutput stage(destination);
     std::ofstream output(stage.file(), std::ios::binary);
     if (!output) {
@@ -279,12 +422,13 @@ void extract(const fs::path& capture, hft::FeedEndpoint endpoint, const fs::path
 
     EquityFeed feed(output, symbols);
     hft::ItchStream stream;
+    RecoveryStats stats;
     hft::UdpPacket packet{};
     unsigned packets_since_progress = 0;
     bool stopped_at_sequence = false;
     while (reader.next(endpoint, packet)) {
         try {
-            stream.read_packet(packet, through_sequence,
+            read_with_recovery(stream, packet, through_sequence, archive ? &*archive : nullptr, stats,
                 [&feed](const hft::ItchMessage& message, std::uint64_t sequence, std::uint64_t time) {
                     feed.apply(message, sequence, time);
                 });
@@ -311,16 +455,26 @@ void extract(const fs::path& capture, hft::FeedEndpoint endpoint, const fs::path
     }
     stage.publish();
     std::cerr << "EXTRACT\trecords=" << feed.records() << "\tlast_sequence=" << stream.last_sequence()
-              << "\tstatus=" << stream.status(stopped_at_sequence) << '\n';
+              << "\tstatus=" << stream.status(stopped_at_sequence)
+              << "\tfirst_sequence=" << stream.first_sequence()
+              << "\tfirst_exchange_ns=" << stream.first_exchange_ns()
+              << "\tlast_exchange_ns=" << stream.exchange_ns()
+              << "\tgap_count=" << stats.gaps << "\trecovered_messages=" << stats.messages << '\n';
 }
 
-void list_symbols(const fs::path& capture, hft::FeedEndpoint endpoint, std::ostream& output) {
+void list_symbols(const fs::path& capture, hft::FeedEndpoint endpoint, std::ostream& output,
+                  const std::optional<RecoverySource>& recovery_source) {
     std::ifstream input(capture, std::ios::binary);
     if (!input) {
         throw std::runtime_error("could not open capture file");
     }
     hft::PcapReader reader(input);
+    std::optional<RecoveryArchive> archive;
+    if (recovery_source) {
+        archive.emplace(*recovery_source);
+    }
     hft::ItchStream stream;
+    RecoveryStats stats;
     hft::UdpPacket packet{};
     std::map<std::string, hft::Directory, std::less<>> instruments;
     std::unordered_set<std::uint32_t> books;
@@ -352,7 +506,7 @@ void list_symbols(const fs::path& capture, hft::FeedEndpoint endpoint, std::ostr
     };
     while (!opening_complete && reader.next(endpoint, packet)) {
         try {
-            stream.read_packet(packet, std::nullopt, collect);
+            read_with_recovery(stream, packet, std::nullopt, archive ? &*archive : nullptr, stats, collect);
         } catch (const std::runtime_error& error) {
             throw std::runtime_error("packet " + std::to_string(packet.index) + ": " + error.what());
         }
@@ -380,31 +534,50 @@ int main(int argc, char** argv) {
     if (argc < 5 || (argc - 5) % 2 != 0) {
         std::cerr << "Usage: hft_asels_feed <capture.pcap> <destination-ipv4> <udp-port>"
                      " <output.ndjson> [--symbols <symbol,...>] [--through-sequence <sequence>]\n"
-                     "       hft_asels_feed <capture.pcap> <destination-ipv4> <udp-port> --list-symbols\n";
+                     "       hft_asels_feed <capture.pcap> <destination-ipv4> <udp-port> --list-symbols\n"
+                     "       Optional recovery: --recovery-capture <file.pcap>"
+                     " --recovery-host <ipv4> --recovery-port <udp-port>\n";
         return 2;
     }
     try {
         const auto endpoint = hft::parse_feed_endpoint(argv[2], argv[3]);
-        if (std::string_view(argv[4]) == "--list-symbols") {
-            if (argc != 5) {
-                throw std::runtime_error("--list-symbols does not accept extraction options");
-            }
-            list_symbols(argv[1], endpoint, std::cout);
-            return 0;
-        }
+        const bool list = std::string_view(argv[4]) == "--list-symbols";
         std::optional<std::uint64_t> through_sequence;
         std::optional<std::set<std::string>> symbols;
+        std::optional<fs::path> recovery_capture;
+        std::optional<std::string_view> recovery_host, recovery_port;
         for (int index = 5; index < argc; index += 2) {
             const std::string_view option(argv[index]);
             if (option == "--through-sequence" && !through_sequence) {
                 through_sequence = hft::parse_sequence_limit(argv[index + 1]);
             } else if (option == "--symbols" && !symbols) {
                 symbols = parse_symbols(argv[index + 1]);
+            } else if (option == "--recovery-capture" && !recovery_capture) {
+                recovery_capture = argv[index + 1];
+            } else if (option == "--recovery-host" && !recovery_host) {
+                recovery_host = argv[index + 1];
+            } else if (option == "--recovery-port" && !recovery_port) {
+                recovery_port = argv[index + 1];
             } else {
                 throw std::runtime_error("invalid or repeated extraction option: " + std::string(option));
             }
         }
-        extract(argv[1], endpoint, argv[4], through_sequence, symbols);
+        std::optional<RecoverySource> recovery;
+        if (recovery_capture || recovery_host || recovery_port) {
+            if (!recovery_capture || !recovery_host || !recovery_port) {
+                throw std::runtime_error("supply --recovery-capture, --recovery-host and --recovery-port together");
+            }
+            recovery.emplace(RecoverySource{*recovery_capture,
+                hft::parse_feed_endpoint(*recovery_host, *recovery_port)});
+        }
+        if (list) {
+            if (through_sequence || symbols) {
+                throw std::runtime_error("--list-symbols does not accept extraction options");
+            }
+            list_symbols(argv[1], endpoint, std::cout, recovery);
+        } else {
+            extract(argv[1], endpoint, argv[4], through_sequence, symbols, recovery);
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "ASELS extraction failed: " << error.what() << '\n';

@@ -47,6 +47,21 @@ inline std::uint64_t parse_sequence_limit(std::string_view text) {
     return parse_bounded_number(text, std::numeric_limits<std::uint64_t>::max(), "MoldUDP64 sequence limit");
 }
 
+class MoldSequenceGap : public std::runtime_error {
+public:
+    MoldSequenceGap(std::uint64_t expected, std::uint64_t received)
+        : std::runtime_error("MoldUDP64 sequence gap: expected " + std::to_string(expected) +
+                             ", received " + std::to_string(received)),
+          expected_(expected), received_(received) {}
+
+    std::uint64_t expected() const { return expected_; }
+    std::uint64_t received() const { return received_; }
+
+private:
+    std::uint64_t expected_;
+    std::uint64_t received_;
+};
+
 class ItchStream {
 public:
     template <typename Apply>
@@ -59,13 +74,13 @@ public:
             }
             sender_ = sender;
             next_sequence_ = packet.first_sequence;
+            first_sequence_ = packet.first_sequence;
         } else if (*sender_ != sender) {
             throw std::runtime_error("unexpected MoldUDP64 session or UDP sender");
         }
 
         if (packet.first_sequence > next_sequence_) {
-            throw std::runtime_error("MoldUDP64 sequence gap: expected " +
-                std::to_string(next_sequence_) + ", received " + std::to_string(packet.first_sequence));
+            throw MoldSequenceGap(next_sequence_, packet.first_sequence);
         }
         if (packet.kind == MoldKind::end_of_session && packet.first_sequence == next_sequence_) {
             if (!itch_ended_) {
@@ -74,6 +89,51 @@ public:
             mold_ended_ = true;
         }
 
+        return read_messages(packet, udp.capture_ns, through_sequence, apply);
+    }
+
+    template <typename Apply>
+    std::uint64_t read_recovered_packet(const MoldPacket& packet, std::uint64_t capture_ns,
+                                        std::uint64_t through_sequence, Apply&& apply) {
+        if (!sender_ || packet.session != sender_->session || packet.kind != MoldKind::data ||
+            packet.first_sequence > next_sequence_ ||
+            next_sequence_ - packet.first_sequence >= packet.message_count) {
+            throw std::runtime_error("recovery packet does not cover the expected sequence and session");
+        }
+        return read_messages(packet, capture_ns, through_sequence, apply);
+    }
+
+    bool has_reached(std::uint64_t sequence) const {
+        return sender_.has_value() && next_sequence_ > sequence;
+    }
+
+    void require_started() const {
+        if (!itch_started_) {
+            throw std::runtime_error("no ITCH Start of Messages for the selected feed");
+        }
+    }
+
+    std::uint64_t first_sequence() const { return first_sequence_; }
+    std::uint64_t next_sequence() const { return next_sequence_; }
+    std::uint64_t last_sequence() const { return next_sequence_ - 1; }
+    std::uint64_t last_capture_ns() const { return last_capture_ns_; }
+    std::uint64_t first_exchange_ns() const { return first_exchange_ns_; }
+    std::uint64_t exchange_ns() const { return exchange_ns_; }
+
+    const char* status(bool stopped_at_sequence) const {
+        if (stopped_at_sequence) {
+            return "sequence_limit";
+        }
+        return mold_ended_ ? "mold_end" : itch_ended_ ? "itch_end" : "capture_prefix";
+    }
+
+private:
+    template <typename Apply>
+    std::uint64_t read_messages(const MoldPacket& packet, std::uint64_t capture_ns,
+                                std::optional<std::uint64_t> through_sequence, Apply& apply) {
+        if (through_sequence && packet.first_sequence > *through_sequence) {
+            return 0;
+        }
         const auto first_new_sequence = next_sequence_;
         auto blocks = packet.blocks;
         std::uint64_t count = packet.message_count;
@@ -93,34 +153,15 @@ public:
             } catch (const std::runtime_error& error) {
                 throw std::runtime_error("sequence " + std::to_string(sequence) + ": " + error.what());
             }
-            last_capture_ns_ = udp.capture_ns;
+            if (sequence == first_sequence_) {
+                first_exchange_ns_ = exchange_ns_;
+            }
+            last_capture_ns_ = capture_ns;
             ++next_sequence_;
         }
         return next_sequence_ - first_new_sequence;
     }
 
-    bool has_reached(std::uint64_t sequence) const {
-        return sender_.has_value() && next_sequence_ > sequence;
-    }
-
-    void require_started() const {
-        if (!itch_started_) {
-            throw std::runtime_error("no ITCH Start of Messages for the selected feed");
-        }
-    }
-
-    std::uint64_t last_sequence() const { return next_sequence_ - 1; }
-    std::uint64_t last_capture_ns() const { return last_capture_ns_; }
-    std::uint64_t exchange_ns() const { return exchange_ns_; }
-
-    const char* status(bool stopped_at_sequence) const {
-        if (stopped_at_sequence) {
-            return "sequence_limit";
-        }
-        return mold_ended_ ? "mold_end" : itch_ended_ ? "itch_end" : "capture_prefix";
-    }
-
-private:
     struct Sender {
         std::array<std::uint8_t, 4> address;
         std::uint16_t port;
@@ -152,8 +193,10 @@ private:
 
     std::optional<Sender> sender_;
     std::optional<std::uint32_t> seconds_;
+    std::uint64_t first_sequence_ = 0;
     std::uint64_t next_sequence_ = 0;
     std::uint64_t last_capture_ns_ = 0;
+    std::uint64_t first_exchange_ns_ = 0;
     std::uint64_t exchange_ns_ = 0;
     bool itch_started_ = false;
     bool itch_ended_ = false;

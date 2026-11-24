@@ -8,6 +8,11 @@ const probability = new Intl.NumberFormat("tr-TR", {style: "percent", maximumFra
 const learningNumber = new Intl.NumberFormat("tr-TR", {maximumFractionDigits: 6});
 const phases = {idle: "Bekliyor", preparing: "Hazırlanıyor", ready: "Hazır", running: "Oynatılıyor",
     paused: "Duraklatıldı", finished: "Tamamlandı", error: "Replay durdu"};
+const coverageLabels = {itch_end: "ITCH kapanışı", mold_end: "MoldUDP64 kapanışı", capture_prefix: "Kısmi kayıt",
+    sequence_limit: "Sıra sınırına kadar", unrecoverable_gap: "Kurtarılamayan boşluk", error: "Okuma hatası"};
+const runLabels = {running: "Sürüyor", finished: "Tamamlandı", aborted: "Sonlandırıldı", error: "Hata"};
+const stopLabels = {manual: "Acil durdurma uygulandı.", loss_limit: "Portföy zarar limitine ulaştı.",
+    audit_error: "Koşu kaydında hata oluştu."};
 const marketPhases = {P_SUREKLI_ISLEM: "Sürekli işlem", P_GUNSONU: "Gün sonu", P_MARJ_YAYIN: "Marj yayını",
     P_ARA: "Ara", P_ACILIS_EMIR_TPL: "Açılış emir toplama", P_ACS_EMR_TP_EIY: "Açılış sonu",
     P_ESLESTIRME: "Eşleştirme", P_KAPANIS_EMIR_TPL: "Kapanış emir toplama"};
@@ -15,9 +20,11 @@ const sideLabel = {B: "Alış", S: "Satış"};
 const outgoing = {O: "Yeni emir", U: "Değiştir", X: "İptal et"};
 const incoming = {A: "Kabul", J: "Ret", U: "Değişti", C: "İptal", E: "Gerçekleşti"};
 let state = {}, actionError = "", initialized = false, requestPending = false, pollPending = false;
+let emergencyPending = false, emergencyAcknowledged;
 let actionRevision = 0;
 let chartSeries = "mid_price";
 let captureChanged = false, settingsChanged = false, speedChanged = false;
+let recoveryChanged = false, recoverySignature, listedRecoveryKey, recoveryRowId = 0, coverageKey;
 let strategyCatalog = null, strategyListPending = false, strategyListError = "", strategyError = "";
 let parameterKey, parameterFields = new Map();
 let catalogKey, resultsKey, resultsSearch, chipsKey, clusterKey, previousFocus;
@@ -233,18 +240,65 @@ function chart() {
     }
 }
 
-function setFiles(files, selected) {
-    const field = el("capture");
+function fileOptions(field, files, placeholder, includePlaceholder = false) {
     const signature = JSON.stringify(files);
     if (field.dataset.signature !== signature) {
+        const selected = field.value;
         field.dataset.signature = signature;
-        field.replaceChildren(...(files.length ? files.map(name => new Option(name, name)) : [new Option("Kayıt yok", "")]));
+        const options = files.map(name => new Option(name, name));
+        if (includePlaceholder || !options.length) options.unshift(new Option(placeholder, ""));
+        field.replaceChildren(...options);
+        if (files.includes(selected)) field.value = selected;
     }
+}
+
+function setFiles(files, selected) {
+    const field = el("capture");
+    fileOptions(field, files, "Kayıt yok");
     if (!captureChanged && selected) field.value = selected;
 }
 
+function recoveryRow(files, entry = {}) {
+    const row = el("recovery-template").content.firstElementChild.cloneNode(true);
+    const rowId = recoveryRowId++;
+    for (const input of row.querySelectorAll("[data-recovery]")) {
+        const key = input.dataset.recovery;
+        input.id = `recovery-${rowId}-${key}`;
+        input.closest(".field").querySelector("label").htmlFor = input.id;
+        if (key === "file") fileOptions(input, files, "Yedek kayıt seç", true);
+        input.value = entry[key] ?? "";
+    }
+    for (const help of row.querySelectorAll("[data-help]")) help.append(makeInfo(help.dataset.help));
+    return row;
+}
+
+function renderRecovery(files = state.files || []) {
+    const panel = el("recovery-options"), rows = el("recovery-rows");
+    panel.hidden = !("recovery" in state);
+    if (panel.hidden) return;
+    const entries = state.recovery || [];
+    const signature = recoveryKey(entries);
+    if (!recoveryChanged && signature !== recoverySignature) {
+        rows.replaceChildren(...entries.map(entry => recoveryRow(files, entry)));
+        recoverySignature = signature;
+        if (entries.length) panel.open = true;
+    }
+    const locked = requestPending || state.phase === "preparing";
+    el("recovery-add").disabled = locked || rows.children.length >= 16 || !files.length;
+    for (const file of rows.querySelectorAll('select[data-recovery="file"]')) fileOptions(file, files, "Yedek kayıt seç", true);
+    for (const field of rows.querySelectorAll("input, select, [data-remove-recovery]")) field.disabled = locked;
+}
+
+function recoveryKey(recoveries = []) {
+    return JSON.stringify(recoveries.map(({file, host, port, primary_port}) => [file, host, port, primary_port]));
+}
+
 function captureSource() {
-    return {file: el("capture").value, host: el("host").value.trim(), port: Number(el("port").value)};
+    const recoveries = [...el("recovery-rows").children].map(row => {
+        const read = key => row.querySelector(`[data-recovery="${key}"]`).value;
+        return {file: read("file"), host: read("host").trim(), port: Number(read("port")), primary_port: Number(read("primary_port"))};
+    });
+    return {file: el("capture").value, host: el("host").value.trim(), port: Number(el("port").value), recoveries};
 }
 
 function sameSource(first, second) {
@@ -322,14 +376,20 @@ function renderSymbolChoices(ready, locked) {
 
 function renderSymbolPicker() {
     const source = captureSource();
-    const catalog = sameSource(state.catalog, source) ? state.catalog : null;
+    const currentRecoveryKey = recoveryKey(source.recoveries);
+    const catalogMatchesRecovery = currentRecoveryKey === (listedRecoveryKey ?? recoveryKey(state.recovery));
+    const catalog = sameSource(state.catalog, source) && catalogMatchesRecovery ? state.catalog : null;
     const ready = catalog?.phase === "ready";
-    const sourceValid = source.file && source.host && Number.isInteger(source.port) && source.port >= 1 && source.port <= 65535;
+    const validPort = port => Number.isInteger(port) && port >= 1 && port <= 65535;
+    const duplicateRecovery = new Set(source.recoveries.map(entry => entry.primary_port)).size !== source.recoveries.length;
+    const recoveryValid = !duplicateRecovery && source.recoveries.every(entry => entry.file && entry.host &&
+        validPort(entry.port) && validPort(entry.primary_port));
+    const sourceValid = source.file && source.host && validPort(source.port) && recoveryValid;
     const locked = requestPending || state.phase === "preparing";
     const legacy = legacyCapture();
     if (ready) {
         const options = catalog.instruments || [];
-        const key = JSON.stringify([source.file, source.host, source.port, options]);
+        const key = JSON.stringify([source.file, source.host, source.port, currentRecoveryKey, options]);
         if (catalogKey !== key) {
             catalogKey = key;
             availableSymbols = options.slice().sort((first, second) => first.symbol.localeCompare(second.symbol, "tr"));
@@ -349,6 +409,8 @@ function renderSymbolPicker() {
     const unavailable = ready ? (catalog.unavailable_ports || []).map(item => item.port) : [];
     let message = "Kaydı ve kanalı seçip hisseleri listele.";
     if (legacy) message = "Kaydı ASELS için açabilirsin.";
+    else if (!recoveryValid) message = duplicateRecovery ? "Her ana UDP portu için bir yedek kanal seç." :
+        "Yedek kanalın PCAP dosyasını, hedef IP adresini ve UDP portlarını gir.";
     else if (failed) message = catalog.error || "Hisseler listelenemedi.";
     else if (catalog?.phase === "loading") message = "Hisse tanımları taranıyor…";
     else if (state.catalog?.phase === "loading") message = "Önceki kaynak taranıyor. Bittiğinde bu kaynağı listeleyebilirsin.";
@@ -522,6 +584,8 @@ function renderStrategySettings() {
     const selection = state.strategy_selection || {};
     const selector = el("strategy-select");
     const applied = findStrategy(selection.id);
+    const config = state.config || {};
+    const sharedInputs = el("shared-config").querySelectorAll("input");
     value("strategy-active-name", applied?.name || selection.id || "—");
     value("strategy-active-key", selection.id && selection.version ? `${selection.id} · ${selection.version}` : "");
     el("strategy-active-key").hidden = !selection.id || !selection.version;
@@ -530,14 +594,16 @@ function renderStrategySettings() {
     if (strategyCatalog && !settingsChanged) {
         selector.value = applied?.id || strategyCatalog.default_strategy_id;
         showParameters(findStrategy(selector.value), selection.params || {});
-        for (const input of el("shared-config").querySelectorAll("input")) {
-            input.value = state.config?.[input.name] ?? "";
-        }
+        for (const input of sharedInputs) input.value = config[input.name] ?? "";
     }
     const locked = !strategyCatalog || !editablePhase || requestPending;
     selector.disabled = locked;
     for (const {input} of parameterFields.values()) input.disabled = locked;
-    for (const input of el("shared-config").querySelectorAll("input")) input.disabled = locked;
+    for (const input of sharedInputs) {
+        const available = Object.hasOwn(config, input.name);
+        input.disabled = locked || !available;
+        input.closest(".field").hidden = initialized && !available;
+    }
     el("save-config").disabled = locked || !selector.value || !settingsChanged;
     el("discard-config").hidden = !settingsChanged;
     el("discard-config").disabled = requestPending;
@@ -602,6 +668,92 @@ async function loadStrategies() {
     }
 }
 
+function renderStopControls() {
+    const acknowledged = state.run?.id && state.run.id === emergencyAcknowledged;
+    const applying = state.risk_stop === "manual_pending" || (acknowledged && !state.risk_stop);
+    const stopped = Boolean(state.risk_stop || acknowledged);
+    el("emergency-stop").disabled = !state.run?.id || !["running", "paused"].includes(state.phase) || emergencyPending || stopped;
+    el("strategy-toggle").checked = Boolean(state.strategy_enabled && !stopped);
+    el("strategy-toggle").disabled = !initialized || requestPending || stopped;
+    value("strategy-status", stopped ? "Kilitli" : state.strategy_enabled ? "Açık" : "Kapalı");
+    const message = applying ? "Durdurma kabul edildi. Açık emirlerin iptali bekleniyor." :
+        stopLabels[state.risk_stop] || "Risk durdurması uygulandı.";
+    const applied = state.risk_stop === "manual" && typeof state.emergency_applied_ms === "number" ?
+        ` Motor uygulama süresi ${format(state.emergency_applied_ms)} ms.` : "";
+    value("risk-stop-notice", stopped ? `${message}${applied} Yeni emirler kilitli. Kilidi kaldırmak için Başa al.` : "");
+    el("risk-stop-notice").hidden = !stopped;
+}
+
+async function requestEmergency() {
+    if (el("emergency-stop").disabled) return;
+    const runId = state.run.id;
+    emergencyPending = true;
+    renderStopControls();
+    try {
+        const response = await fetch("/api/emergency-stop", {method: "POST",
+            headers: {"Content-Type": "application/json"}, body: JSON.stringify({run_id: runId})});
+        const result = await response.json();
+        if (!response.ok || !result.accepted) throw new Error(result.error || "Acil durdurma kabul edilmedi.");
+        emergencyAcknowledged = result.run_id;
+    } catch (error) {
+        actionError = error.message;
+        render(state);
+    } finally {
+        emergencyPending = false;
+        renderStopControls();
+    }
+    poll();
+}
+
+function renderReplayIntegrity() {
+    const reports = Object.entries(state.coverage || {});
+    const {run, ouch_gateway: gateway} = state;
+    const interrupted = state.interrupted_runs || [];
+    const coverage = reports.map(([port, row]) => [port, row.status, row.gap_count, row.recovered_messages,
+        row.last_sequence, row.expected_sequence, row.received_sequence]);
+    const signature = JSON.stringify(coverage);
+    el("replay-integrity").hidden = !coverage.length && !run && !gateway && !interrupted.length;
+    el("coverage-details").hidden = !coverage.length;
+    el("interrupted-runs").hidden = !interrupted.length;
+    value("interrupted-run-ids", interrupted.map(({id, status}) =>
+        `${id} (${status === "interrupted" ? "Kontrol noktası doğrulandı" : "Doğrulanamadı"})`).join(" · "));
+    if (signature !== coverageKey) {
+        coverageKey = signature;
+        const body = el("coverage-rows");
+        body.replaceChildren();
+        for (const [port, status, ...counts] of coverage) {
+            const row = body.insertRow();
+            if (["capture_prefix", "error", "unrecoverable_gap"].includes(status)) el("coverage-details").open = true;
+            cell(row, port);
+            cell(row, coverageLabels[status] || status || "—",
+                status === "capture_prefix" ? "coverage-warning" : ["error", "unrecoverable_gap"].includes(status) ? "negative" : "");
+            for (const count of counts) cell(row, format(count));
+        }
+    }
+    el("run-meta").hidden = !run;
+    if (run) {
+        value("run-status", runLabels[run.status] || run.status || "—");
+        value("run-id", run.id || "—");
+        value("run-records", format(run.records));
+        el("run-digest").hidden = !run.events_sha256;
+        value("run-sha", run.events_sha256 || "");
+        const canDownload = Boolean(run.events_sha256) && /^[a-f0-9]{32}$/.test(run.id);
+        el("run-downloads").hidden = !canDownload;
+        if (canDownload) {
+            el("run-manifest").href = `/api/runs/${run.id}/manifest.json`;
+            el("run-events").href = `/api/runs/${run.id}/events.ndjson`;
+        }
+    }
+    el("gateway-meta").hidden = !gateway;
+    const marketFeed = Boolean(gateway && run && state.market_feed && /^[a-f0-9]{32}$/.test(run.id));
+    el("market-feed-meta").hidden = !marketFeed;
+    if (marketFeed) el("market-feed-link").href = `/api/market-feed?run_id=${run.id}&after=0&limit=256`;
+    if (gateway) {
+        value("gateway-address", `${gateway.host}:${gateway.port}`);
+        value("gateway-session", gateway.session || "—");
+    }
+}
+
 function render(next) {
     state = next;
     const {phase, progress = {}, strategy = {}, files = []} = state;
@@ -627,12 +779,12 @@ function render(next) {
     el("pause").disabled = phase !== "running" || requestPending;
     el("reset").disabled = phase === "idle" || requestPending;
     el("advance-open").disabled = !["ready", "paused"].includes(phase) || state.market_phase === "P_SUREKLI_ISLEM" || requestPending || (phase === "ready" && settingsChanged);
+    renderRecovery(files);
     renderSymbolPicker();
     renderInstruments();
     renderRisk();
-    el("strategy-toggle").checked = Boolean(state.strategy_enabled);
-    el("strategy-toggle").disabled = requestPending;
-    value("strategy-status", state.strategy_enabled ? "Açık" : "Kapalı");
+    renderStopControls();
+    renderReplayIntegrity();
     renderStrategySettings();
     renderLearning();
     for (const button of document.querySelectorAll("[data-speed]")) button.setAttribute("aria-pressed", String(String(state.speed) === button.dataset.speed));
@@ -683,14 +835,17 @@ async function control(message) {
     actionError = "";
     if (message.action === "select_strategy") strategyError = "";
     renderStrategySettings();
+    renderRecovery();
     renderSymbolPicker();
     renderInstruments();
     renderRisk();
+    renderStopControls();
     try {
         const response = await fetch("/api/control", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(message)});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Kontrol işlemi başarısız.");
-        if (message.action === "load") captureChanged = false;
+        if (message.action === "list_instruments") listedRecoveryKey = recoveryKey(message.recoveries);
+        if (message.action === "load") captureChanged = recoveryChanged = false;
         if (["select_strategy", "reset"].includes(message.action)) {
             settingsChanged = false;
             strategyError = "";
@@ -711,7 +866,28 @@ el("capture-form").addEventListener("input", event => {
     if (["capture", "host", "port"].includes(event.target.id)) {
         captureChanged = true;
         renderSymbolPicker();
+    } else if (event.target.matches("[data-recovery]")) {
+        recoveryChanged = true;
+        renderSymbolPicker();
     }
+});
+el("recovery-add").addEventListener("click", () => {
+    const rows = el("recovery-rows");
+    const row = recoveryRow(state.files || [], {host: el("host").value, primary_port: rows.children.length ? "" : el("port").value});
+    recoveryChanged = true;
+    rows.append(row);
+    renderRecovery();
+    renderSymbolPicker();
+    row.querySelector("select").focus();
+});
+el("recovery-rows").addEventListener("click", event => {
+    const button = event.target.closest("[data-remove-recovery]");
+    if (!button) return;
+    recoveryChanged = true;
+    button.closest(".recovery-row").remove();
+    renderRecovery();
+    renderSymbolPicker();
+    el("recovery-add").focus();
 });
 el("capture-form").addEventListener("submit", event => {
     event.preventDefault();
@@ -755,6 +931,7 @@ el("risk-form").addEventListener("submit", event => {
 el("risk-details").addEventListener("toggle", renderRiskRows);
 for (const action of ["start", "pause", "reset"]) el(action).addEventListener("click", () => control({action}));
 el("advance-open").addEventListener("click", () => control({action: "advance_open"}));
+el("emergency-stop").addEventListener("click", requestEmergency);
 el("book-depth").addEventListener("change", bookRows);
 el("book-source").addEventListener("change", bookRows);
 for (const button of document.querySelectorAll("[data-speed]")) button.addEventListener("click", () => {
@@ -787,10 +964,14 @@ el("config-form").addEventListener("input", event => {
     strategyError = "";
     render(state);
 });
+el("config-form").addEventListener("invalid", event => {
+    const options = event.target.closest("details");
+    if (options) options.open = true;
+}, true);
 el("config-form").addEventListener("submit", event => {
     event.preventDefault();
     if (el("save-config").disabled || !event.currentTarget.reportValidity()) return;
-    const config = Object.fromEntries([...el("shared-config").querySelectorAll("input")].map(input => [input.name, input.valueAsNumber]));
+    const config = Object.fromEntries([...el("shared-config").querySelectorAll("input:enabled")].map(input => [input.name, input.valueAsNumber]));
     const params = Object.fromEntries([...parameterFields].map(([name, {input, options}]) => {
         if (options) return [name, options[input.selectedIndex]];
         if (input.type === "checkbox") return [name, input.checked];

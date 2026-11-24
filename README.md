@@ -5,7 +5,7 @@ Proje Borsa İstanbul Pay Piyasası için çevrimdışı replay ve tekli veya ç
 ## Nasıl çalışır?
 
 1. PCAP dosyasında verdiğin IP ve UDP portuna giden paketleri bulur.
-2. MoldUDP64 sıra numaralarını kontrol eder ve ITCH mesajlarını okur. Eksik sıra numarası görürse durur.
+2. MoldUDP64 sıralarını doğrular ve ITCH mesajlarını okur. Dashboard, aynı oturuma ait yedek PCAP verilirse eksik aralığı arşivden doldurur. Doğrulanamayan boşlukta replay başlamaz.
 3. Emir ekleme, gerçekleşme ve silme mesajlarını deftere uygular. Dosyanın sonunda kalan fiyatlı emirleri yazar. Aynı fiyattaki emirlerde BIST'in sıralama zamanı ve sıra numarası kullanılır.
 
 Dashboard, C++ okuyucusundan gelen seçili hisse olaylarını ortak bir sanal piyasa saatinde işler. Strateji her hisse için ayrı bir örnek olarak çalışır ve simüle edilmiş borsaya BISTECH OUCH emirleri gönderir. Gerçekleşmeler ilgili hissenin yerel test portföyüne yazılır.
@@ -35,6 +35,72 @@ python -B -m dashboard
 5. **Oturumdaki hisseler** tablosu her hissenin pozisyonunu, kâr/zararını ve gerçekleşmelerini gösterir. Hisse adına tıklayarak defteri, grafiği ve emir günlüğünü o hisseye odaklayabilirsin. Odak değişirken diğer hisseler aynı replay’de işlemeye devam eder. **Emir defteri** bölümünde **Simüle** veya **Tarihsel ITCH** görünümü seçilebilir.
 
 Her kanalın MoldUDP64 sırası ayrı doğrulanır. Birden fazla kanal seçildiğinde olaylar borsa zamanı ile birleştirilir. Eşit zaman damgasında önce UDP portu, sonra kaynak Mold sırası kullanılır. Strateji ayarları ortak uygulanır. Pozisyon limiti ve emirler hisse bazındadır.
+
+### Gecikme ve işlem öncesi risk
+
+**Strateji → Ortak simülasyon ayarları** altında üç gecikme hattı ayarlanabilir. Gecikmeler ve dalgalanmalar mikrosaniye cinsindendir ve sanal borsa saatine uygulanır.
+
+| Ayar | Sanal başlangıç ve bitiş |
+|---|---|
+| Piyasa verisi | ITCH olayının deftere uygulanmasından stratejinin o olayın görüntüsünü almasına kadar |
+| Emir gidişi | Stratejinin emir kararından emrin eşleştiriciye varmasına kadar |
+| OUCH yanıtı | Motorun yanıt üretmesinden stratejinin veya yerel OUCH istemcisinin yanıtı almasına kadar |
+
+Her hat için ayrı dalgalanma seçilebilir. Gecikme, temel sürenin etrafından örneklenir ve sıfırdan küçükse sıfıra çekilir. Aynı hattaki mesaj sırası korunur. Aynı tohum, aynı girdiler ve aynı motor koşulu gecikme dizisini tekrar üretir. Varsayılan ayarda emir gidişi 100 µs, diğer gecikmeler ve dalgalanmalar sıfırdır. İç strateji, zamanı gelen emir yanıtlarını bir sonraki piyasa bildirimiyle alır.
+
+Pay bazındaki pozisyon limitine ek olarak emir miktarı, sanal saniyedeki yeni ve değiştirilen emir sayısı, açık emirleri içeren brüt değer ve toplam zarar sınırı ayarlanabilir. Ek limit için `0` kapalı demektir. Zarar sınırı veya **Acil durdur** açık emirleri iptal eder, bekleyenleri reddeder ve emir girişini yeni koşuya kadar kilitler. Tarihsel replay devam eder. Brüt sınır emir kabul anında değerlendirilir. `POST /api/emergency-stop`, mevcut `run_id` ile alınan durdurma isteğini HTTP `202` ile onaylar. Bu onay strateji çağrısının tamamlanmasını beklemez. Dashboard isteğin alındığını, uygulandığını ve aradaki gerçek süreyi ayrı gösterir. Harici OUCH kipinde motor işlemekte olduğu olayı tamamlayıp durdurmayı sıradaki işlemden önce uygular.
+
+### Veri kapsamı ve yedek kanal
+
+**Yedek ITCH kanalları** isteğe bağlı olarak aynı MoldUDP64 oturumuna ait ikinci bir PCAP veya arşivlenmiş Rewinder trafiği alır. Her eşlemede ana UDP portunu ve yedek IP/portu belirt. Kayıtların ikisi de çalışma alanında olmalı. Kapsam bölümünde kanalın bitişi, tespit edilen boşluk ve geri alınan mesaj sayısı görünür. `capture_prefix` kapanış işareti olmayan doğrulanmış kesittir. Eksik aralık yedekte yoksa hazırlık durur ve ilk eksik sıra gösterilir.
+
+Hazır olay dosyasından tarihsel defteri bağımsız bir Python uygulamasıyla kontrol edebilirsin. Bu kontrol, normalize ITCH mesajlarından çıkarılan emir kimliklerini, bakiyeleri, sıra bilgilerini ve fiyat kademelerini karşılaştırır. Ham paket çözümünü bağımsız olarak doğrulamak için ayrı ayrıştırıcı çıktısı, gerçek gerçekleşmeleri karşılaştırmak için broker kayıtları gerekir.
+
+```powershell
+python -B tools/verify_reference_book.py 21001=build/dashboard-cache/OLAY_DOSYASI.ndjson --symbols ASELS.E --output build/reference-check.json
+```
+
+### Koşu günlüğü ve tekrarlanabilirlik
+
+Her başlatılan koşu `build/runs/<kimlik>/` altına kaydedilir. `manifest.json` PCAP ve olay dosyası özetlerini, kapsamı, strateji sürümü ve ayarlarını, motor özetini ve portföy sonucunu içerir. `events.ndjson` emir kararlarını, varışları, yanıtları, gerçekleşmeleri, eşleştirme gerekçelerini ve risk olaylarını sıralı kaydeder. Koşu kapandığında dashboard’dan iki dosyayı indirebilirsin. SHA-256 ile kontrol edebilir ve aynı iki koşunun çıktılarını kıyaslayabilirsin. Bağımsız bütünlük kanıtı için özetleri kayıt dizininden ayrı sakla.
+
+```powershell
+python -B tools/verify_runs.py build/runs/ILK_KOSU build/runs/TEKRAR_KOSUSU
+```
+
+Günlük yazıldıkça her 4.096 kayıtta veya bir saniye geçtikten sonraki ilk yazmada, ayrıca duraklatma ve kapanışta, diske eşitlenir. `checkpoint.json` o ana kadar kaydedilen bölümün uzunluğunu, kayıt sayısını ve SHA-256 özetini tutar. Süreç kesilirse dashboard sonraki açılışta yazarı kalmamış ve doğrulanabilir koşuyu `interrupted` olarak işaretler ve kimliğini gösterir. Denetim için yalnız son kontrol noktasına kadar doğrulanan bölümü ayrı bir dizine çıkarabilirsin. Son kontrol noktasından sonraki satırlar diske ulaşmamış olabilir.
+
+```powershell
+python -B tools/verify_runs.py build/runs/KOSU --inspect
+python -B tools/verify_runs.py build/runs/KOSU --recover-to build/recovered/KOSU
+```
+
+Tamamlanmış harici OUCH koşusunu kayıtlı komutlardan tekrar çalıştırmak için her UDP kanalı başına koşuda kullanılan aynı olay dosyasını ver. Araç olay dosyalarının ve motor kaynaklarının SHA-256 özetini doğrular. Kaydedilmiş komutları ve manuel kontrolleri aynı sanal zaman ve sıra sınırlarında uygular. Üretilen sıralı ikili OUCH yanıtlarını, son portföyü ve emir sayaçlarını kayıtla karşılaştırır.
+
+```powershell
+python -B tools/replay_external.py build/runs/KOSU --tape 21001=build/dashboard-cache/OLAY_DOSYASI.ndjson
+```
+
+### Harici OUCH oturumu
+
+Yerel bir istemciyle test etmek için ayrı bir SoupBinTCP portu aç ve dashboard’dan **Harici OUCH istemcisi** stratejisini seç. `SIM` varsayılan test kullanıcı adıdır. Parola test oturumu içindir ve en çok 10 ASCII karakter olabilir.
+
+```powershell
+$env:HFT_OUCH_PASSWORD = 'SIMTEST1'
+python -B -m dashboard --ouch-port 9001 --ouch-user SIM
+```
+
+İstemci `127.0.0.1:9001` adresine bağlanır ve SoupBinTCP Login Request ile oturum açar. Tek istemci, sıralı yanıtlar, kalp atışı ve tamponda kalan sıra numarasından yeniden bağlanma desteklenir. Emirler mevcut pasif Day `Enter`, `Replace` ve `Cancel` kapsamıyla motora gider. `Replace` ve `Cancel` ilk `Enter` token’ını kullanır. **Başa al** yeni oturum kimliği üretir. Ortak OUCH hattında emirler, farklı hisselere gitse veya gecikme dalgalanması uygulansa bile giriş sırasını korur. Tarihsel ITCH olayları, aynı sanal zamana denk gelen emir varışlarından önce işlenir. Aktif koşudaki giriş çerçeveleri, sanal zaman damgaları ve yayımlanan yanıt sırası koşu günlüğünde bulunur.
+
+Harici OUCH koşusunda **Piyasa verisi uç noktası** bağlantısı normalleştirilmiş tarihsel ITCH olaylarını yerel HTTP üzerinden JSON olarak verir. Sorgu `GET /api/market-feed?run_id=KOSU&after=0&limit=256` ile başlar. Sonraki istekte `after` için `next_cursor` değerini kullan. Her satırda kaynak UDP portu, özgün Mold sıra numarası, normalleştirilmiş olay dizisi ve olayın istemciye açıldığı sanal zaman `available_time_ns` bulunur. Örneğin `event` dizisinin ilk dört alanı tür, replay sırası, borsa zamanı ve defter kimliğidir. İlk entegrasyon testi için **1×** hızı kullan. İstemci 32.768 olaylık tamponun gerisinde kalırsa HTTP `409` ve `overrun` döner. Baştan eksiksiz okumak için koşuyu yenile. Akış API’si ayrı bir ham ITCH ağ bağlantısı kullanmaz.
+
+### Broker kaydıyla karşılaştırma
+
+Bağımsız bir broker veya test ortamı kaydındaki OUCH yanıtlarını, oturum başına bir CSV dosyasına gerçek yanıt sırasıyla çıkar. Başlık `symbol,token,type,time_ns,price_raw,quantity,reason` olmalı. `A`, `U` ve `E` satırları fiyat ve miktarı, `J` ve `C` satırları gerekçe kodunu taşır. İsteğe bağlı `side`, `previous_token` ve `request_time_ns` alanları karşılaştırmayı ayrıntılandırır. `time_ns` borsanın yanıt zamanıdır. `request_time_ns` aynı zaman tabanına çevrilmiş istek gönderim zamanıdır. İşlem fiyatının tamsayı ölçeği, simüle edilen hissenin ölçeğiyle aynı olmalı. Tamamlanmış bir harici OUCH koşusunda araç, istemciye yayımlanan `A/J/U/C/E` dizisini karşılaştırır ve sıra, eşleşme, fiyat, miktar, zaman ve varsa gidiş gecikmesi farklarını raporlar. Çıkış kodu `0` uyum, `1` fark, `2` girdi veya bütünlük hatasıdır.
+
+```powershell
+python -B tools/compare_broker_run.py build/runs/KOSU build/broker-reference.csv --output build/broker-comparison.json
+```
 
 ### Portföy fiyat duyarlılığı ve stres testi
 
@@ -66,7 +132,7 @@ Pozisyon sabitken duyarlılık şok boyunca değişmez. Bu nedenle hesap bu sena
 
 ### Test stratejisi ve OUCH
 
-Strateji, seçili payların sürekli işlem fazında en iyi alış ve satış kademelerine iki pasif Day limit emir verir. Fiyatlar değiştiğinde kotasyonları OUCH `Replace` ile günceller. Yerel motor ikili SoupBinTCP veri çerçeveleri içinde `Enter`, `Replace`, `Cancel` isteklerini ve kabul, ret, iptal ve gerçekleşme yanıtlarını işler. Emir günlüğündeki mesaj bilgisinden token, istek/yanıt sırası ve ikili çerçeve görülebilir. Aynı sanal zaman damgasındaki tarihsel ITCH olayı, simüle emir varışından önce işlenir. Ağ üzerinden OUCH oturumu açma ve Mass Quote sonraki protokol kapsamıdır. [BISTECH OUCH](https://borsaistanbul.com/files/bistech-ouch-protocol-specification-sr-3-12.pdf)
+Strateji, seçili payların sürekli işlem fazında en iyi alış ve satış kademelerine iki pasif Day limit emir verir. Fiyatlar değiştiğinde kotasyonları OUCH `Replace` ile günceller. Yerel motor ikili SoupBinTCP veri çerçeveleri içinde `Enter`, `Replace`, `Cancel` isteklerini ve kabul, ret, iptal ve gerçekleşme yanıtlarını işler. Emir günlüğündeki mesaj bilgisinden token, istek/yanıt sırası ve ikili çerçeve görülebilir. Aynı sanal zaman damgasındaki tarihsel ITCH olayı, simüle emir varışından önce işlenir. Harici test istemcisi için isteğe bağlı oturum yerel arayüzde açılır. Mass Quote protokol kapsamı dışındadır. [BISTECH OUCH](https://borsaistanbul.com/files/bistech-ouch-protocol-specification-sr-3-12.pdf)
 
 ### Öğrenen çift taraflı kotasyon
 
@@ -111,7 +177,14 @@ Hazır dosyayı kopyalamadan denemek için `python -B -m dashboard --strategy-mo
 
 `on_event(event, view, updates)` çağrısı salt okunur piyasa ve emir bilgisi alır. Emir vermemek için `()`, emir vermek için örneğin `(Enter("B", view.best_bid, 10),)` döndür. `"B"` alış, `"S"` satış, fiyat ham tamsayı, miktar pay adedidir. Örneğin `price_decimals=2` için `12345`, 123,45 ₺ anlamına gelir. `Replace` ve `Cancel` kendi açık emirlerinin `order_id` değerini kullanır. Motor sürekli işlem fazında pasif Day limit emirleriyle ve her payda taraf başına bir açık emir ile bir bekleyen istekle çalışır. `view.symbol` ilgili payı gösterir. Çok kanallı koşuda `event.sequence` birleştirilmiş replay sırasıdır. Ham kaynak sırasına `event.source_sequence` üzerinden ulaşılır.
 
-`--strategy-module` ile yüklenen modül dashboard’u başlatan kullanıcının yerel yetkileriyle çalışır. Bu seçenek güvendiğin Python modülleri içindir. [API tipleri](dashboard/strategy_api.py) · [Kayıt ve parametre şeması](dashboard/strategy_registry.py)
+`--strategy-module` için yerel Linux Docker motoru, cgroup v2 ve önceden indirilmiş `python:3.12-slim` imajı gerekir. Windows’ta Linux konteyner motorunu kullan. Her pay için ayrı süreç çalışır. Kapsayıcı ağsızdır, yalnız seçili kaynakların salt okunur kopyasını görür ve CPU, bellek, süreç ile yanıt süresi sınırlarına tabidir. Çalıştırıcı bu sınırları doğrulayamazsa harici modülü yüklemeyi reddeder. Hazır stratejiler normal dashboard başlatmasıyla çalışır.
+
+```powershell
+docker pull python:3.12-slim
+python -B -m dashboard --strategy-module examples.asels_alis
+```
+
+[API tipleri](dashboard/strategy_api.py) · [Kayıt ve parametre şeması](dashboard/strategy_registry.py) · [Docker çalışma seçenekleri](https://docs.docker.com/reference/cli/docker/container/run/)
 
 ## Replay
 
@@ -119,7 +192,7 @@ Hazır dosyayı kopyalamadan denemek için `python -B -m dashboard --strategy-mo
 .\build\hft_replay.exe .\capture.pcap 239.1.2.3 31000
 ```
 
-IPv4 adresini ve UDP portunu kayıttaki **Pay Piyasası ITCH kanalının** hedefiyle değiştir. Karma kayıtlarda yalnızca seçilen hedefe ait paketler işlenir. Linux'ta çalıştırılabilir dosya `./build/hft_replay`. İlk sürüm klasik PCAP 2.4, Ethernet/VLAN ve IPv4/UDP destekler. Seçilen hedefte tek kaynak ve MoldUDP64 oturumu bekler. Kayıt `T` ve `S/O` seans başlangıcını içermeli. Seans içinden başlama ve sıra boşluğu kurtarma planın sonraki aşamasında.
+IPv4 adresini ve UDP portunu kayıttaki **Pay Piyasası ITCH kanalının** hedefiyle değiştir. Karma kayıtlarda yalnızca seçilen hedefe ait paketler işlenir. Linux'ta çalıştırılabilir dosya `./build/hft_replay`. İlk sürüm klasik PCAP 2.4, Ethernet/VLAN ve IPv4/UDP destekler. Seçilen hedefte tek kaynak ve MoldUDP64 oturumu bekler. Kayıt `T` ve `S/O` seans başlangıcını içermeli. Bu komut tek kaydı denetler. Yedek akışla kurtarma dashboard’un kullandığı `hft_asels_feed` çıkarıcısında yer alır.
 
 Çıktı UTF-8 ve sekmeyle ayrılmıştır. Zamanlar Unix epoch nanosaniye cinsindendir. Fiyatlar, defterin referans verisindeki fiyat ölçeğine karşılık gelen ham işaretli tamsayılardır.
 

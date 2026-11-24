@@ -55,6 +55,24 @@ if(BUILD_TESTING)
         add_test(NAME learning_quote COMMAND
             "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_learning_quote.py)
         set_tests_properties(learning_quote PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME ouch_gateway COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_ouch_gateway.py)
+        set_tests_properties(ouch_gateway PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME enterprise_runtime COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_enterprise_runtime.py)
+        set_tests_properties(enterprise_runtime PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME strategy_isolation COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_isolation.py)
+        set_tests_properties(strategy_isolation PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME external_ouch_priority COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_external_priority.py)
+        set_tests_properties(external_ouch_priority PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME audit_recovery COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_run_audit.py)
+        set_tests_properties(audit_recovery PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME broker_comparison COMMAND
+            "${Python3_EXECUTABLE}" -B -m unittest discover -s tests -p test_broker_comparison.py)
+        set_tests_properties(broker_comparison PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     else()
         message(STATUS "Python 3 unavailable. Skipping the replay integration test.")
     endif()

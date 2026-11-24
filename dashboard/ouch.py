@@ -7,6 +7,8 @@ from struct import Struct
 # BISTECH OUCH, sections 4.1.1–4.1.3 and 4.2.1–4.2.5.
 # https://borsaistanbul.com/files/bistech-ouch-protocol-specification.pdf
 _SOUP = Struct("!Hc")
+_LOGIN_REQUEST = Struct("!6s10s10s20s")
+_LOGIN_ACCEPTED = Struct("!10s20s")
 _ENTER = Struct("!c14sIcQiBB16s15s32sQBBBB3s2x")
 _REPLACE = Struct("!c14s14sQiB16s15s32sQB8x")
 _CANCEL = Struct("!c14s")
@@ -49,6 +51,14 @@ class Reply:
     pre_trade_quantity: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class LoginRequest:
+    username: str
+    password: str
+    session: str
+    sequence: int
+
+
 def _token(token: str) -> bytes:
     raw = token.encode("ascii")
     if not 0 < len(raw) <= 14 or any(not 33 <= byte <= 126 for byte in raw):
@@ -62,19 +72,98 @@ def _read_token(raw: bytes) -> str:
     return token
 
 
-def data_frame(payload: bytes, kind: bytes) -> bytes:
-    if kind not in (b"U", b"S") or not 0 < len(payload) < 65_535:
-        raise ValueError("invalid SoupBinTCP data frame")
+def soup_packet(kind: bytes, payload: bytes = b"") -> bytes:
+    if len(kind) != 1 or len(payload) >= 65_535:
+        raise ValueError("invalid SoupBinTCP packet")
     return _SOUP.pack(len(payload) + 1, kind) + payload
 
 
-def _payload(frame: bytes, expected_kind: bytes) -> bytes:
-    if len(frame) <= _SOUP.size:
-        raise ValueError("truncated SoupBinTCP data frame")
+def split_soup_packet(frame: bytes) -> tuple[bytes, bytes]:
+    if len(frame) < _SOUP.size:
+        raise ValueError("truncated SoupBinTCP packet")
     length, kind = _SOUP.unpack_from(frame)
-    if length != len(frame) - 2 or kind != expected_kind:
+    if length != len(frame) - 2:
+        raise ValueError("invalid SoupBinTCP packet length")
+    return kind, frame[_SOUP.size:]
+
+
+def _login_text(value: str, width: int, *, blank: bool = False, left: bool = False) -> bytes:
+    raw = value.encode("ascii")
+    if (not raw and not blank) or len(raw) > width or any(not 33 <= byte <= 126 for byte in raw):
+        raise ValueError("invalid SoupBinTCP login field")
+    return raw.rjust(width, b" ") if left else raw.ljust(width, b" ")
+
+
+def _read_login_text(raw: bytes, *, blank: bool = False) -> str:
+    value = raw.strip(b" ").decode("ascii")
+    _login_text(value, len(raw), blank=blank)
+    return value
+
+
+def _login_sequence(sequence: int) -> bytes:
+    if not 0 <= sequence < 10**20:
+        raise ValueError("invalid SoupBinTCP login sequence")
+    return str(sequence).encode("ascii").rjust(20, b" ")
+
+
+def _read_login_sequence(raw: bytes) -> int:
+    digits = raw.lstrip(b" ")
+    if not digits.isdigit():
+        raise ValueError("invalid SoupBinTCP login sequence")
+    return int(digits)
+
+
+def encode_login_request(username: str, password: str, *, session: str = "", sequence: int = 1) -> bytes:
+    payload = _LOGIN_REQUEST.pack(_login_text(username, 6), _login_text(password, 10),
+                                  _login_text(session, 10, blank=True, left=True),
+                                  _login_sequence(sequence))
+    return soup_packet(b"L", payload)
+
+
+def decode_login_request(frame: bytes) -> LoginRequest:
+    kind, payload = split_soup_packet(frame)
+    if kind != b"L" or len(payload) != _LOGIN_REQUEST.size:
+        raise ValueError("invalid SoupBinTCP login request")
+    username, password, session, sequence = _LOGIN_REQUEST.unpack(payload)
+    return LoginRequest(_read_login_text(username), _read_login_text(password),
+                        _read_login_text(session, blank=True), _read_login_sequence(sequence))
+
+
+def encode_login_accepted(session: str, sequence: int) -> bytes:
+    if sequence == 0:
+        raise ValueError("invalid SoupBinTCP accepted sequence")
+    return soup_packet(b"A", _LOGIN_ACCEPTED.pack(_login_text(session, 10, left=True),
+                                                   _login_sequence(sequence)))
+
+
+def decode_login_accepted(frame: bytes) -> tuple[str, int]:
+    kind, payload = split_soup_packet(frame)
+    if kind != b"A" or len(payload) != _LOGIN_ACCEPTED.size:
+        raise ValueError("invalid SoupBinTCP login acceptance")
+    session, sequence = _LOGIN_ACCEPTED.unpack(payload)
+    value = _read_login_sequence(sequence)
+    if value == 0:
+        raise ValueError("invalid SoupBinTCP accepted sequence")
+    return _read_login_text(session), value
+
+
+def encode_login_rejected(reason: bytes) -> bytes:
+    if reason not in (b"A", b"S"):
+        raise ValueError("invalid SoupBinTCP login rejection reason")
+    return soup_packet(b"J", reason)
+
+
+def data_frame(payload: bytes, kind: bytes) -> bytes:
+    if kind not in (b"U", b"S") or not payload:
+        raise ValueError("invalid SoupBinTCP data frame")
+    return soup_packet(kind, payload)
+
+
+def _payload(frame: bytes, expected_kind: bytes) -> bytes:
+    kind, payload = split_soup_packet(frame)
+    if kind != expected_kind or not payload:
         raise ValueError("invalid SoupBinTCP data frame length or type")
-    return frame[_SOUP.size:]
+    return payload
 
 
 def encode_command(command: Command) -> bytes:

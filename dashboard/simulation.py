@@ -2,13 +2,15 @@
 
 from bisect import bisect_left, insort
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from fractions import Fraction
 from heapq import heapify, heappop, heappush
 from math import isfinite
+from threading import Event
 
 from .ouch import Command, Reply, decode_command, decode_reply, encode_command, encode_reply
 from .portfolio_risk import MarkedPosition
+from .scenario import EXTRA_DEFAULTS, EXTRA_LIMITS, LinkDelay
 from .strategies.two_sided import TwoSidedQuote
 from .strategy_api import (Cancel, Enter, MarketEvent, OpenOrder, OrderIntent, OrderUpdate,
                            Replace, Strategy, StrategyError, StrategyView, tick_band, valid_price)
@@ -22,6 +24,7 @@ DEFAULT_CONFIG = {
     "spread_ticks": 0,
     "fee_bps": 0.0,
     "enabled": True,
+    **EXTRA_DEFAULTS,
 }
 
 _SIDES = ("B", "S")
@@ -32,15 +35,21 @@ _REJECT_SIZE = -3
 _REJECT_TOKEN = -4
 _REJECT_BOOK = -5
 _REJECT_PENDING = -6
+_REJECT_RATE = -7
+_REJECT_NOTIONAL = -8
+_REJECT_HALT = -9
 _SYSTEM_CANCEL = 9
 _OWN_RANK_SEQUENCE = 1 << 32  # Source ranks use uint32, and historical messages win time ties.
 _REASONS = {
     _REJECT_STALE: "Kotasyon devre dışı veya seans uygun değil",
     _REJECT_PRICE: "Geçersiz fiyat adımı veya pasiflik koşulu",
-    _REJECT_SIZE: "Lot veya pozisyon sınırı",
+    _REJECT_SIZE: "Lot, emir büyüklüğü veya pozisyon sınırı",
     _REJECT_TOKEN: "Geçersiz veya yinelenen emir kimliği",
     _REJECT_BOOK: "Pay defteri veya emir tarafı uyuşmuyor",
     _REJECT_PENDING: "Bu tarafta bekleyen bir emir isteği var",
+    _REJECT_RATE: "Sanal saniyedeki emir isteği sınırı",
+    _REJECT_NOTIONAL: "Açık emirler dahil brüt pozisyon değeri sınırı",
+    _REJECT_HALT: "Risk nedeniyle emre kapalı",
     1: "Strateji iptali",
     _SYSTEM_CANCEL: "Seans veya strateji ayarı değişti",
 }
@@ -52,7 +61,7 @@ def validated_config(settings: dict, base: dict | None = None) -> dict:
     config = {**(DEFAULT_CONFIG if base is None else base), **settings}
     limits = {"quote_size": (1, 1_000_000), "max_position": (1, 10_000_000),
               "quote_interval_ms": (1, 3_600_000), "latency_us": (0, 10_000_000),
-              "spread_ticks": (0, 100)}
+              "spread_ticks": (0, 100), **EXTRA_LIMITS}
     for field, (low, high) in limits.items():
         value = config[field]
         if type(value) is not int or not low <= value <= high:
@@ -183,6 +192,7 @@ class ScheduledCommand:
     frame: bytes
     order_id: int | None
     origin_sequence: int
+    external_sequence: int | None = None
 
 
 class Portfolio:
@@ -265,6 +275,28 @@ class Simulation:
         self._scale = 1
         self.round_lot = 0
         self.phase = ""
+        self.audit_sink = None
+        self.reply_sink = None
+        self.reply_context_sink = None
+        self.risk_guard = None
+        self.halted = False
+        self._emergency_event: Event | None = None
+        self._market_events = deque()
+        self._replies = deque()
+        self._client_orders = ()
+        self._client_position = 0
+        self._client_pending = {}
+        self._rate_window = deque()
+        self._configure_links()
+
+    def _configure_links(self) -> None:
+        config = self.config
+        for lane, key in (("market", "market_latency_us"), ("order", "latency_us"),
+                          ("reply", "reply_latency_us")):
+            setattr(self, f"_{lane}_link", LinkDelay(self._expected_symbol, lane, config["latency_seed"],
+                    config[key], config[f"{lane}_jitter_us"]))
+        self._delayed_market = bool(self._market_link.base or self._market_link.jitter)
+        self._delayed_replies = bool(self._reply_link.base or self._reply_link.jitter)
 
     def _configured_quotes(self) -> TwoSidedQuote:
         return TwoSidedQuote(self.config["quote_size"], self.config["quote_interval_ms"],
@@ -273,11 +305,16 @@ class Simulation:
     def configure(self, settings: dict) -> None:
         new = validated_config(settings, self.config)
         if self.config != new:
+            latency_changed = any(new[field] != self.config[field] for field in
+                                  ("latency_us", "market_latency_us", "reply_latency_us", "latency_seed",
+                                   "market_jitter_us", "order_jitter_us", "reply_jitter_us"))
             self.config = new
             self._fee = Fraction(str(new["fee_bps"])) / 10_000
             if self._legacy_parameters:
                 self._strategy = self._configured_quotes()
             self._withdraw()
+            if latency_changed:
+                self._configure_links()
 
     def set_enabled(self, enabled: bool) -> None:
         self.configure({"enabled": enabled})
@@ -287,31 +324,115 @@ class Simulation:
             return
         self._session_ended = True
         self._withdraw()
+        self._drop_commands(_REJECT_STALE)
+
+    def _drop_commands(self, reason: int) -> None:
         while self._commands:
             pending = self._commands.popleft()
             command = decode_command(pending.frame)
-            self._reply(Reply("J", self.exchange_ns, command.token, reason=_REJECT_STALE),
+            self._reply(Reply("J", self.exchange_ns, command.token, reason=reason),
                         side=pending.side, request=pending.request_sequence, related_order_id=pending.order_id)
 
     def sync_clock(self, time_ns: int) -> None:
         """Move the local clock without a strategy callback or a market event."""
         self.exchange_ns = max(self.exchange_ns, time_ns)
 
-    def next_arrival(self) -> tuple[int, int, int] | None:
-        if not self._commands:
-            return None
-        pending = self._commands[0]
-        return pending.arrival_ns, pending.origin_sequence, pending.request_sequence
+    def next_action(self) -> tuple[int, int, int, int] | None:
+        candidates = []
+        if self._commands:
+            item = self._commands[0]
+            priority = item.origin_sequence if item.external_sequence is None else item.external_sequence
+            candidates.append((item.arrival_ns, 0, priority, item.request_sequence))
+        if self._replies:
+            time, update, *_ = self._replies[0]
+            candidates.append((time, 1, 0, update.sequence))
+        if self._market_events:
+            time, event, _ = self._market_events[0]
+            candidates.append((time, 2, event.sequence, 0))
+        return min(candidates) if candidates else None
 
     def receive_next(self) -> None:
-        """Deliver the FIFO head at its recorded arrival time."""
-        pending = self._commands.popleft()
-        self.sync_clock(pending.arrival_ns)
-        self._receive(pending)
+        action = self.next_action()
+        if action is None:
+            return
+        time, lane, *_ = action
+        self.sync_clock(time)
+        if lane == 0:
+            self._receive(self._commands.popleft())
+        elif lane == 1:
+            _, update, frame, position, orders = self._replies.popleft()
+            self._client_position, self._client_orders = position, orders
+            self._deliver_reply(update, frame, time)
+        else:
+            _, event, view = self._market_events.popleft()
+            if self._active() and view.generation == self._generation:
+                self._invoke_strategy(event, self._client_view(view))
+
+    def emergency_stop(self) -> None:
+        if self.halted:
+            return
+        self.halted = True
+        self._withdraw()
+        self._drop_commands(_REJECT_HALT)
+
+    def set_emergency_event(self, event: Event | None) -> None:
+        self._emergency_event = event
+
+    def _emergency_requested(self) -> bool:
+        return not self.halted and self._emergency_event is not None and self._emergency_event.is_set()
+
+    def _check_emergency(self) -> bool:
+        if self._emergency_requested():
+            if self.risk_guard is None:
+                self.emergency_stop()
+            else:
+                self.risk_guard._check_emergency(self.exchange_ns)
+        return self.halted
+
+    def external_order(self, command: Command, time_ns: int, *, sequence: int | None = None,
+                       arrival_floor: int = 0) -> int | None:
+        self.sync_clock(time_ns)
+        self._check_emergency()
+        live = None
+        if command.kind == "O":
+            side = command.side
+        else:
+            original = command.previous_token if command.kind == "U" else command.token
+            live = next((quote for quote in self._quotes.values() if quote.root_token == original), None)
+            side = live.side if live else ""
+        order_id = live.order_id if live else None
+        if not self._active():
+            reason = _REJECT_HALT if self.halted else _REJECT_STALE
+        elif side not in _SIDES:
+            reason = _REJECT_TOKEN
+        elif side in self._pending:
+            reason = _REJECT_PENDING
+        else:
+            return self._send(command, side, order_id, external_sequence=sequence, arrival_floor=arrival_floor)
+        self._reject_intent(reason, side=side, order_id=order_id, token=command.token)
+        return None
+
+    def has_external_token(self, token: str) -> bool:
+        return any(quote.root_token == token for quote in self._quotes.values())
+
+    def reject_external(self, command: Command, reason: int, time_ns: int) -> None:
+        self.sync_clock(time_ns)
+        self._reject_intent(reason, side=command.side, token=command.token)
+
+    def close_strategy(self) -> None:
+        close = getattr(self._strategy, "close", None)
+        if callable(close):
+            close()
 
     def _active(self) -> bool:
         return (self.config["enabled"] and self.phase in _CONTINUOUS and not self._session_ended
-                and not self._matching_suspended)
+                and not self._matching_suspended and not self.halted)
+
+    def _emit(self, kind: str, fields: dict) -> None:
+        if self.audit_sink is not None:
+            self.audit_sink(kind, {"symbol": self._expected_symbol, "itch_sequence": self.sequence,
+                                   "source_port": self._source_port, "source_sequence": self._source_sequence,
+                                   **fields})
 
     def _price(self, raw: int | Fraction | None) -> float | None:
         return None if raw is None else float(raw / self._scale)
@@ -323,7 +444,7 @@ class Simulation:
     def _log(self, direction: str, kind: str, token: str, time_ns: int, frame: bytes, *,
              side: str = "", price: int = 0, quantity: int | None = None, reason: int = 0,
              previous_token: str = "", request_sequence: int | None = None) -> None:
-        self._journal.append({
+        entry = {
             "sequence": self._sent + self._received, "time_ns": str(time_ns),
             "direction": direction, "type": kind, "token": token, "side": side or None,
             "price": self._price(price) if price else None, "quantity": quantity,
@@ -331,21 +452,34 @@ class Simulation:
             "ouch_sequence": self._received if direction == "receive" else None,
             "reason": reason or None, "reason_text": _REASONS.get(reason),
             "previous_token": previous_token or None, "frame_hex": frame.hex(),
-        })
+        }
+        self._journal.append(entry)
+        self._emit("ouch", entry)
 
-    def _send(self, command: Command, side: str, order_id: int | None = None) -> None:
+    def _send(self, command: Command, side: str, order_id: int | None = None, *,
+              external_sequence: int | None = None, arrival_floor: int = 0) -> int | None:
+        if self._check_emergency() or (command.kind != "X" and not self._admit_rate()):
+            self._reject_intent(_REJECT_HALT if self.halted else _REJECT_RATE, side=side,
+                                order_id=order_id, token=command.token)
+            return None
         frame = encode_command(command)
+        if self._check_emergency():
+            self._reject_intent(_REJECT_HALT, side=side, order_id=order_id, token=command.token)
+            return None
         self._sent += 1
         self._request_sequence += 1
         request = self._request_sequence
-        arrival = max(self._last_arrival, self.exchange_ns + self.config["latency_us"] * 1000)
+        arrival = max(self._last_arrival, arrival_floor, self._order_link.arrival(self.exchange_ns))
         self._last_arrival = arrival
         self._commands.append(ScheduledCommand(arrival, side, self._generation, request, frame, order_id,
-                                               self.sequence))
+                                               self.sequence, external_sequence))
         self._pending[side] = request
+        if self._delayed_replies:
+            self._client_pending[side] = request
         self._log("send", command.kind, command.token, self.exchange_ns, frame, side=side,
                   price=command.price, quantity=command.quantity or None,
                   previous_token=command.previous_token, request_sequence=request)
+        return arrival
 
     def _reply(self, reply: Reply, *, side: str = "", request: int | None = None,
                canceled_quantity: int | None = None, related_order_id: int | None = None) -> None:
@@ -356,13 +490,29 @@ class Simulation:
         self._log("receive", decoded.kind, decoded.token, decoded.time_ns, frame,
                   side=decoded.side or side, price=decoded.price, quantity=quantity,
                   reason=decoded.reason, previous_token=decoded.previous_token, request_sequence=request)
-        if self._updates is not None:
-            self._updates.append(OrderUpdate(
-                decoded.kind, self._received, decoded.time_ns, decoded.side or side or None,
-                reply.order_id or related_order_id, request, decoded.token, decoded.price or None,
-                canceled_quantity if decoded.kind == "C" else None if decoded.kind == "J" else decoded.quantity,
-                decoded.reason or None,
-            ))
+        if self._updates is None and self.reply_sink is None and not self._delayed_replies:
+            return
+        update = OrderUpdate(decoded.kind, self._received, decoded.time_ns, decoded.side or side or None,
+                             reply.order_id or related_order_id, request, decoded.token, decoded.price or None,
+                             canceled_quantity if decoded.kind == "C" else None if decoded.kind == "J" else decoded.quantity,
+                             decoded.reason or None)
+        if self._delayed_replies:
+            arrival = self._reply_link.arrival(decoded.time_ns)
+            self._replies.append((arrival, update, frame, self._portfolio.position, self._open_orders()))
+        else:
+            self._deliver_reply(update, frame, decoded.time_ns)
+
+    def _deliver_reply(self, update: OrderUpdate, frame: bytes, time: int) -> None:
+        if update.side in self._client_pending and self._client_pending[update.side] == update.request_sequence:
+            del self._client_pending[update.side]
+        if self._updates is not None and self.reply_sink is None:
+            self._updates.append(update)
+        if self.reply_context_sink is not None:
+            self.reply_context_sink(frame, self._expected_symbol, update.sequence, time)
+        elif self.reply_sink is not None:
+            self.reply_sink(frame)
+        if self._delayed_replies:
+            self._emit("reply_delivery", {"ouch_sequence": update.sequence, "time_ns": str(time)})
 
     def _cancel_quote(self, quote: Quote, time_ns: int, reason: int, request: int | None = None) -> None:
         self._book[quote.side].remove(-quote.order_id)
@@ -373,6 +523,7 @@ class Simulation:
     def _withdraw(self) -> None:
         self._generation += 1
         self._pending.clear()
+        self._market_events.clear()
         for quote in tuple(self._quotes.values()):
             self._cancel_quote(quote, self.exchange_ns, _SYSTEM_CANCEL)
 
@@ -385,17 +536,41 @@ class Simulation:
     def _capacity(self, side: str) -> int:
         return self.config["max_position"] + self._book[side].sign * self._portfolio.position
 
+    def _admit_rate(self) -> bool:
+        limit = self.config["order_rate_limit"]
+        if not limit:
+            return True
+        if self.risk_guard is not None:
+            return self.risk_guard.admit(self.exchange_ns, limit)
+        now = self.exchange_ns
+        while self._rate_window and self._rate_window[0] <= now - 1_000_000_000:
+            self._rate_window.popleft()
+        if len(self._rate_window) >= limit:
+            return False
+        self._rate_window.append(now)
+        return True
+
+    def _open_orders(self) -> tuple[OpenOrder, ...]:
+        return tuple(OpenOrder(quote.order_id, quote.side, quote.price, quote.remaining, quote.executed)
+                     for quote in self._quotes.values())
+
+    def _client_view(self, view: StrategyView) -> StrategyView:
+        position = self._client_position if self._delayed_replies else self._portfolio.position
+        return replace(view, position=position,
+                       buy_capacity=max(0, self.config["max_position"] - position),
+                       sell_capacity=max(0, self.config["max_position"] + position),
+                       orders=self._client_orders if self._delayed_replies else self._open_orders(),
+                       pending_sides=tuple(self._client_pending if self._delayed_replies else self._pending))
+
     def _strategy_view(self, bid: int | None, ask: int | None,
                        reference_bid: int | None, reference_ask: int | None) -> StrategyView:
-        orders = tuple(OpenOrder(quote.order_id, quote.side, quote.price, quote.remaining, quote.executed)
-                       for quote in self._quotes.values())
         return StrategyView(
             self.symbol, self.phase, self.exchange_ns, self.sequence, bid, ask,
             self._book["B"].levels[bid].quantity if bid is not None else 0,
             self._book["S"].levels[ask].quantity if ask is not None else 0,
             self.price_decimals, self.round_lot, self._portfolio.position,
             max(0, self._capacity("B")), max(0, self._capacity("S")),
-            orders, tuple(self._pending), self._generation, self._tick_bands,
+            self._open_orders(), tuple(self._pending), self._generation, self._tick_bands,
             reference_bid, reference_ask,
             self._reference_book["B"].levels[reference_bid].quantity if reference_bid is not None else 0,
             self._reference_book["S"].levels[reference_ask].quantity if reference_ask is not None else 0,
@@ -403,27 +578,46 @@ class Simulation:
 
     def _decide(self, kind: str, args: list, bid: int | None, ask: int | None,
                 reference_bid: int | None, reference_ask: int | None) -> None:
-        if not self._active() or (self._coalesced_quotes and
+        if self._check_emergency() or not self._active() or self.reply_sink is not None or (self._coalesced_quotes and
                                   not self._strategy._due(self.exchange_ns, self._generation)):
             return
         event = MarketEvent(kind, self.sequence, self.exchange_ns, tuple(args),
                             self._source_port, self._source_sequence)
         view = self._strategy_view(bid, ask, reference_bid, reference_ask)
+        if self._delayed_market:
+            if len(self._market_events) >= 100_000:
+                raise RuntimeError("Piyasa verisi gecikme kuyruğu doldu.")
+            self._market_events.append((self._market_link.arrival(self.exchange_ns), event, view))
+        else:
+            self._invoke_strategy(event, self._client_view(view) if self._delayed_replies else view)
+
+    def _invoke_strategy(self, event: MarketEvent, view: StrategyView) -> None:
+        if self._check_emergency():
+            return
         updates = tuple(self._updates) if self._updates else ()
         if self._updates is not None:
             self._updates.clear()
         try:
             intents = self._strategy.on_event(event, view, updates)
+            if self._check_emergency():
+                return
             self._validate_intents(intents)
         except Exception as error:
             self.finish()
-            raise StrategyError(self.sequence, str(error) or type(error).__name__) from error
+            raise StrategyError(event.sequence, str(error) or type(error).__name__) from error
+        if intents and self.audit_sink is not None:
+            self._emit("decision", {"view_sequence": event.sequence, "time_ns": str(self.exchange_ns),
+                                    "best_bid": view.best_bid, "best_ask": view.best_ask,
+                                    "position": view.position,
+                                    "intents": [{"type": type(intent).__name__, **asdict(intent)} for intent in intents]})
         for intent in intents:
+            if self._check_emergency():
+                return
             self._route_intent(intent)
 
     @staticmethod
     def _validate_intents(intents: tuple[OrderIntent, ...]) -> None:
-        if type(intents) is not tuple:
+        if type(intents) is not tuple or len(intents) > 128:
             raise TypeError("Strateji bir emir kararı demeti döndürmeli.")
         for intent in intents:
             if type(intent) is Enter:
@@ -439,9 +633,10 @@ class Simulation:
             if not valid:
                 raise TypeError("Enter, Replace veya Cancel kararındaki alanlar geçersiz.")
 
-    def _reject_intent(self, reason: int, *, side: str = "", order_id: int | None = None) -> None:
+    def _reject_intent(self, reason: int, *, side: str = "", order_id: int | None = None,
+                       token: str | None = None) -> None:
         self._request_sequence += 1
-        self._reply(Reply("J", self.exchange_ns, self._token(), reason=reason), side=side,
+        self._reply(Reply("J", self.exchange_ns, token or self._token(), reason=reason), side=side,
                     request=self._request_sequence, related_order_id=order_id)
 
     def _route_intent(self, intent: OrderIntent) -> None:
@@ -491,11 +686,31 @@ class Simulation:
             return _REJECT_PRICE
         if not self.round_lot or not 0 < quantity <= self._capacity(side) or quantity % self.round_lot:
             return _REJECT_SIZE
+        if self.config["order_size_limit"] and quantity > self.config["order_size_limit"]:
+            return _REJECT_SIZE
+        if self.risk_guard is not None and not self.risk_guard.allows(self, side, price, quantity):
+            return _REJECT_NOTIONAL
         return 0
 
+    def _halt_pending(self, pending: ScheduledCommand) -> bool:
+        if not self._emergency_requested():
+            return False
+        # Keep this command in the queue so the usual stop rejects every pending order.
+        self._commands.appendleft(pending)
+        self._check_emergency()
+        return True
+
     def _receive(self, pending: ScheduledCommand) -> None:
+        if self._halt_pending(pending):
+            return
         command = decode_command(pending.frame)
         side, time = pending.side, pending.arrival_ns
+        if self.audit_sink is not None:
+            data = {"request_sequence": pending.request_sequence, "origin_sequence": pending.origin_sequence,
+                    "time_ns": str(time), "token": command.token}
+            if pending.external_sequence is not None:
+                data["external_sequence"] = pending.external_sequence
+            self._emit("order_arrival", data)
         if self._pending.get(side) == pending.request_sequence:
             del self._pending[side]
         live = self._quotes.get(side)
@@ -510,6 +725,8 @@ class Simulation:
             else:
                 reason = self._validate_quote(side, command.price, command.quantity)
                 if not reason:
+                    if self._halt_pending(pending):
+                        return
                     self._order_id += 1
                     live = Quote(command.token, command.token, self._order_id, side,
                                  command.price, command.quantity)
@@ -521,12 +738,16 @@ class Simulation:
         elif live is None or live.root_token != (command.token if command.kind == "X" else command.previous_token):
             reason = _REJECT_TOKEN
         elif command.kind == "X":
+            if self._halt_pending(pending):
+                return
             self._cancel_quote(live, time, 1, pending.request_sequence)
         else:
             remaining = max(0, command.quantity - live.executed)
             price = command.price or live.price
             reason = self._validate_quote(side, price, remaining) if remaining else 0
             if not reason:
+                if self._halt_pending(pending):
+                    return
                 retain = price == live.price and remaining <= live.remaining
                 previous = live.token
                 book = self._book[side]
@@ -551,10 +772,14 @@ class Simulation:
         if not quantity:
             return 0
         fee = quantity * quote.price * self._fee
+        if self._check_emergency():
+            return 0
         self._portfolio.fill(quote.side, quote.price, quantity, fee)
         quote.remaining -= quantity
         quote.executed += quantity
         self._book[quote.side].reduce(-quote.order_id, quantity)
+        if not quote.remaining:
+            del self._quotes[quote.side]
         self._fills += 1
         self._reply(Reply("E", self.exchange_ns, quote.token, self.book_id, quote.side,
                           quote.order_id, quote.price, quantity, match_id=self._fills), side=quote.side)
@@ -566,8 +791,7 @@ class Simulation:
         })
         if self._source_port is not None:
             self._trades[-1].update(source_port=self._source_port, source_mold_sequence=self._source_sequence)
-        if not quote.remaining:
-            del self._quotes[quote.side]
+        self._emit("fill", self._trades[-1])
         return quantity
 
     def _audit(self, event: str, **fields: object) -> None:
@@ -576,6 +800,7 @@ class Simulation:
         if self._source_port is not None:
             self._matching_journal[-1].update(source_port=self._source_port,
                                               source_mold_sequence=self._source_sequence)
+        self._emit("matching", self._matching_journal[-1])
 
     def _match_budget(self, side: str, limit: int, quantity: int, kind: str, match_id: int | None,
                       source_order_id: int) -> tuple[int, int, int, int]:
@@ -776,10 +1001,11 @@ class Simulation:
         time = max(time, self.exchange_ns)
         # Historical messages at the same timestamp win the tie. Process pending
         # arrivals only once the next observed timestamp is strictly later.
-        while self._commands and self._commands[0].arrival_ns < time:
+        while (self._commands or self._market_events or self._replies) and self.next_action()[0] < time:
             self.receive_next()
         self.sequence, self.exchange_ns = sequence, time
         self._source_port, self._source_sequence = source_port, source_sequence
+        self._check_emergency()
         if kind == "R":
             book_id, symbol, decimals, lot = args
             if (canonical_symbol(symbol) != self._expected_symbol or self.book_id not in (None, book_id)
@@ -813,9 +1039,30 @@ class Simulation:
         reference_bid, reference_ask = self._reference_book["B"].best(), self._reference_book["S"].best()
         if reference_bid is not None and reference_ask is not None and reference_bid < reference_ask:
             self._last_mark = Fraction(reference_bid + reference_ask, 2)
+        if self.config["loss_limit_tl"] and not self.halted:
+            if self.risk_guard is not None:
+                self.risk_guard.observe_pnl(self)
+            elif self.risk_values()[1] <= -self.config["loss_limit_tl"]:
+                self.emergency_stop()
         bid, ask, can_decide = self._shadow_bbo(reference_bid, reference_ask)
         if can_decide:
             self._decide(kind, args, bid, ask, reference_bid, reference_ask)
+
+    def risk_values(self, proposed: tuple[str, int, int] | None = None) -> tuple[Fraction, Fraction]:
+        position = self._portfolio.position
+        prices = [self._last_mark or Fraction(0)]
+        quantities = {side: 0 for side in _SIDES}
+        for quote in self._quotes.values():
+            if proposed is None or proposed[0] != quote.side:
+                quantities[quote.side] = quote.remaining
+                prices.append(quote.price)
+        if proposed is not None:
+            side, price, quantity = proposed
+            quantities[side] = quantity
+            prices.append(price)
+        gross = max(abs(position + quantities["B"]), abs(position - quantities["S"]))
+        pnl = self._portfolio.realized + self._unrealized()
+        return Fraction(gross * max(prices), self._scale), Fraction(pnl, self._scale)
 
     def _levels(self, book: BookSide, quote: Quote | None = None) -> list[dict]:
         rows = []

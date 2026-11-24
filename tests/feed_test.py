@@ -16,12 +16,17 @@ EPOCH_NS = SECOND * 1_000_000_000
 
 
 class FeedExtractionTest(unittest.TestCase):
-    def extract(self, data, *options):
+    def extract(self, data, *options, recovery=None):
         with tempfile.TemporaryDirectory() as directory_name:
             directory_path = Path(directory_name)
             capture = directory_path / "fixture.pcap"
             output = directory_path / "events.ndjson"
             capture.write_bytes(data)
+            if recovery is not None:
+                archive = directory_path / "recovery.pcap"
+                archive.write_bytes(recovery)
+                options = (*options, "--recovery-capture", archive, "--recovery-host", "239.1.2.3",
+                           "--recovery-port", str(PORT + 1))
             process = subprocess.run([EXECUTABLE, capture, "239.1.2.3", str(PORT), output, *options],
                                      check=False, capture_output=True, encoding="utf-8")
             self.assertFalse(output.with_suffix(".ndjson.partial").exists())
@@ -103,6 +108,59 @@ class FeedExtractionTest(unittest.TestCase):
                 self.assertEqual(process.returncode, 1)
                 self.assertIsNone(extracted)
                 self.assertIn(problem, process.stderr)
+
+    def test_recovery_reconstructs_exact_missing_interval_in_mold_order(self):
+        events = [seconds(), system_event(b"O"), directory(ASELS, b"ASELS.E"), tick_size(ASELS),
+                  state(ASELS), add(ASELS, b"B", 9, 10000, 1, 1),
+                  execute(ASELS, b"B", 9, 2), delete(ASELS, b"B", 9), system_event(b"C")]
+        primary = pcap([udp_frame(mold(1, events[:4])), udp_frame(mold(7, events[6:]))])
+        recovery = pcap([udp_frame(mold(6, events[5:7]), port=PORT + 1),
+                         udp_frame(mold(6, events[5:7]), port=PORT + 1),
+                         udp_frame(mold(5, [events[4]]), port=PORT + 1)])
+        expected_code, expected = self.extract(pcap([udp_frame(mold(1, events))]))
+        self.assertEqual(expected_code.returncode, 0, expected_code.stderr)
+        process, extracted = self.extract(primary, recovery=recovery)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(extracted, expected)
+        self.assertIn("\tfirst_sequence=1\tfirst_exchange_ns=" + str(EPOCH_NS), process.stderr)
+        self.assertIn("\tgap_count=1\trecovered_messages=2", process.stderr)
+
+        process, extracted = self.extract(primary, "--through-sequence", "5", recovery=recovery)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(extracted, [event for event in expected if event[1] <= 5])
+        self.assertIn("\tlast_sequence=5\tstatus=sequence_limit", process.stderr)
+        self.assertIn("\tgap_count=1\trecovered_messages=1", process.stderr)
+
+    def test_recovery_fails_closed_for_wrong_session_missing_or_conflicting_blocks(self):
+        opening = [seconds(), system_event(b"O"), directory(ASELS, b"ASELS.E")]
+        order = add(ASELS, b"B", 9, 10000, 1, 1)
+        trade_message = execute(ASELS, b"B", 9, 2)
+        data = pcap([udp_frame(mold(1, opening)), udp_frame(mold(6, [trade_message]))])
+        cases = (
+            ([udp_frame(mold(4, [state(ASELS), order], session=b"OTHERDAY  "), port=PORT + 1)],
+             4, 0, "does not contain MoldUDP64 sequence 4"),
+            ([udp_frame(mold(4, [state(ASELS)]), port=PORT + 1)],
+             5, 1, "does not contain MoldUDP64 sequence 5"),
+            ([udp_frame(mold(4, [state(ASELS), order, execute(ASELS, b"B", 9, 3)]), port=PORT + 1)],
+             4, 0, "disagrees with primary at sequence 6"),
+        )
+        for packets, missing, count, problem in cases:
+            with self.subTest(problem=problem):
+                process, extracted = self.extract(data, recovery=pcap(packets))
+                self.assertEqual(process.returncode, 1)
+                self.assertIsNone(extracted)
+                self.assertIn(problem, process.stderr)
+                self.assertIn(f"\tstatus=unrecoverable_gap\texpected_sequence={missing}\treceived_sequence=6"
+                              f"\tgap_count=1\trecovered_messages={count}", process.stderr)
+
+    def test_recovers_missing_tail_announced_by_mold_end(self):
+        events = [seconds(), system_event(b"O"), directory(ASELS, b"ASELS.E"), system_event(b"C")]
+        primary = pcap([udp_frame(mold(1, events[:3])), udp_frame(mold(5, count=0xffff))])
+        recovery = pcap([udp_frame(mold(4, events[-1:]), port=PORT + 1)])
+        process, extracted = self.extract(primary, recovery=recovery)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(extracted[-1], ["S", 4, EPOCH_NS + 100, "C"])
+        self.assertIn("\tlast_sequence=4\tstatus=mold_end", process.stderr)
 
     def test_missing_and_ambiguous_asels_fail_closed(self):
         for directories, problem in (

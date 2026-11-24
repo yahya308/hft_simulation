@@ -48,6 +48,11 @@
                     <button type="submit" class="button secondary" id="list-instruments" disabled>Hisseleri listele</button>
                     <span class="help" data-help="Seçilen kayıttaki Pay Piyasası ITCH hisse tanımlarını bulur. Sonuçlarda her hissenin kaynak portu görünür."></span>
                 </div>
+                <details class="recovery-options" id="recovery-options" hidden>
+                    <summary>Yedek ITCH kanalları <span class="help" data-help="Ana akışta sıra boşluğu varsa aynı MoldUDP64 oturumunun kapsamını tamamlamak için yerel bir yedek PCAP ve kanal eşlemesi seç."></span></summary>
+                    <div class="recovery-rows" id="recovery-rows"></div>
+                    <button type="button" class="button secondary" id="recovery-add">Yedek kanal ekle</button>
+                </details>
                 <div class="symbol-picker" id="symbol-picker">
                     <div class="symbol-picker-head">
                         <div class="field symbol-search-field" id="symbol-search-field" hidden><span class="field-label"><label for="symbol-search">Hisse ara</label><span class="help" data-help="Kodun bir bölümünü yaz. Arama sadece görünen seçenekleri filtreler ve işaretlenen hisseleri korur."></span></span><input type="search" id="symbol-search" placeholder="Hisse kodu" autocomplete="off"></div>
@@ -59,12 +64,22 @@
                     <button type="submit" class="button secondary" id="load" disabled>Kaydı yükle</button>
                 </div>
             </form>
+            <template id="recovery-template">
+                <div class="recovery-row">
+                    <div class="field"><span class="field-label"><label>Yedek PCAP</label><span class="help" data-help="Yedek ITCH paketlerini içeren ve çalışma alanında bulunan yerel PCAP dosyası."></span></span><select data-recovery="file" required></select></div>
+                    <div class="field"><span class="field-label"><label>Yedek hedef IP</label><span class="help" data-help="Yedek PCAP içindeki ITCH kanalının hedef IPv4 adresi."></span></span><input data-recovery="host" placeholder="IPv4 adresi" autocomplete="off" required></div>
+                    <div class="field"><span class="field-label"><label>Ana UDP portu</label><span class="help" data-help="Sıra boşluğu görüldüğünde bu yedeğin kullanılacağı ana kanalın UDP portu. Her ana kanal için bir yedek seçilebilir."></span></span><input data-recovery="primary_port" type="number" min="1" max="65535" step="1" required></div>
+                    <div class="field"><span class="field-label"><label>Yedek UDP portu</label><span class="help" data-help="Yedek PCAP içinde aynı MoldUDP64 oturumuna ait paketlerin hedef UDP portu."></span></span><input data-recovery="port" type="number" min="1" max="65535" step="1" required></div>
+                    <button type="button" class="button secondary" data-remove-recovery aria-label="Yedek kanal eşlemesini kaldır">Kaldır</button>
+                </div>
+            </template>
             <div class="transport">
                 <div class="transport-actions">
                     <button class="button primary" id="start" type="button" disabled><span class="play-icon" aria-hidden="true"></span><span id="start-label">Başlat</span></button>
                     <button class="button secondary" id="pause" type="button" disabled>Duraklat</button>
                     <button class="button secondary" id="reset" type="button" disabled>Başa al</button>
                     <button class="button secondary" id="advance-open" type="button" disabled>Sürekli işleme ilerle</button><span class="help" data-help="Önceki olayları sırasıyla işleyip görüntülenen hisse sürekli işlem fazına girdiğinde duraklar. Seçilen replay hızı korunur."></span>
+                    <button class="button danger" id="emergency-stop" type="button" aria-describedby="risk-stop-notice" disabled>Acil durdur</button><span class="help" data-help="Yeni emir girişini kilitler. Motor ilk güvenli adımda açık emirleri iptal eder. Gösterilen süre, isteğin kabulünden uygulamaya kadar geçen gerçek milisaniyedir. Kilidi kaldırmak için replay’i başa al."></span>
                 </div>
                 <div class="speed-control">
                     <span class="field-label"><span>Oynatma hızı</span><span class="help" data-help="1× kayıt zamanıyla gerçek zamanlı oynatır. 1.000× kayıt zamanını bin katına kadar sıkıştırır. Maks modunda zaman beklemeleri kaldırılır."></span></span>
@@ -72,6 +87,32 @@
                         <button type="button" data-speed="1" aria-pressed="true">1×</button><button type="button" data-speed="10" aria-pressed="false">10×</button><button type="button" data-speed="100" aria-pressed="false">100×</button><button type="button" data-speed="1000" aria-pressed="false">1.000×</button><button type="button" data-speed="max" aria-pressed="false">Maks</button>
                     </div>
                     <form id="speed-form" class="speed-form"><input id="custom-speed" type="number" min="1" max="1000" step="1" value="1" aria-label="Özel replay hızı" required><button class="button secondary" type="submit">Ayarla</button></form>
+                </div>
+            </div>
+            <p class="risk-stop-notice" id="risk-stop-notice" role="status" hidden></p>
+            <div class="replay-integrity" id="replay-integrity" hidden>
+                <details id="coverage-details" hidden>
+                    <summary>Veri kapsamı <span class="help" data-help="Her ITCH kanalı için kapanış işaretini, sıra boşluklarını ve yedekten tamamlanan mesaj sayısını gösterir."></span></summary>
+                    <div class="instruments-table-wrap"><table class="instruments-table" aria-label="ITCH kanal kapsamı">
+                        <thead><tr><th scope="col">UDP portu <span class="help" data-help="Ana ITCH kanalının hedef portu."></span></th><th scope="col">Durum <span class="help" data-help="Kayıtta görülen oturum kapanışı, kısmi kayıt veya okuma hatası."></span></th><th scope="col">Boşluk <span class="help" data-help="Ana akışta saptanan MoldUDP64 sıra boşluğu sayısı."></span></th><th scope="col">Tamamlanan mesaj <span class="help" data-help="Ana sıraya yedek akıştan eklenen mesaj sayısı."></span></th><th scope="col">Son sıra <span class="help" data-help="Kayıttan başarıyla uygulanan son MoldUDP64 sıra numarası."></span></th><th scope="col">Beklenen sıra <span class="help" data-help="Çözülemeyen boşlukta beklenen ilk sıra numarası."></span></th><th scope="col">Gelen sıra <span class="help" data-help="Çözülemeyen boşluğun ardından ana akışta görülen ilk sıra numarası."></span></th></tr></thead>
+                        <tbody id="coverage-rows"></tbody>
+                    </table></div>
+                </details>
+                <div class="integrity-line" id="run-meta" hidden>
+                    <span>Koşu kaydı <strong id="run-status">—</strong><span class="help" data-help="Koşunun girdileri, ayarları ve sonuçları koşu manifestinde saklanır. Sıralı olaylar ayrı günlükte tutulur."></span></span>
+                    <span>Kimlik <code id="run-id"></code><span class="help" data-help="Koşu manifesti ve olay günlüğünde kullanılan benzersiz koşu kimliği."></span></span>
+                    <span>Kayıt <strong id="run-records">—</strong><span class="help" data-help="Olay günlüğüne yazılan sıralı kayıt sayısı."></span></span>
+                    <span class="run-digest" id="run-digest" hidden>SHA-256 <code id="run-sha"></code><span class="help" data-help="Kapanan koşunun olay dosyasının bütünlük özeti."></span></span>
+                    <span class="run-downloads" id="run-downloads" hidden><a id="run-manifest">Koşu manifesti</a><a id="run-events">Olay günlüğü</a></span>
+                </div>
+                <details id="interrupted-runs" hidden>
+                    <summary>Bu açılışta incelenen kesintili koşular <span class="help" data-help="Doğrulanmış kayıtlar son disk kontrol noktasına kadar kurtarılabilir. Koşu kimliğini kullanarak README’deki verify_runs komutunu çalıştır."></span></summary>
+                    <div class="integrity-line"><code id="interrupted-run-ids"></code></div>
+                </details>
+                <div class="integrity-line" id="gateway-meta" hidden>
+                    <span>Yerel OUCH <strong id="gateway-address">—</strong><span class="help" data-help="Harici OUCH istemcisinin bağlanabileceği yerel simülasyon adresi."></span></span>
+                    <span>Oturum <code id="gateway-session">—</code><span class="help" data-help="Yerel SoupBinTCP oturumunun kimliği."></span></span>
+                    <span id="market-feed-meta" hidden><a id="market-feed-link" target="_blank" rel="noopener">Piyasa verisi uç noktası</a><span class="help" data-help="Harici OUCH istemcisi için normalleştirilmiş tarihsel olayları JSON olarak verir. İstemci next_cursor değerini sonraki sorgunun after parametresinde kullanır."></span></span>
                 </div>
             </div>
         </section>
@@ -178,10 +219,32 @@
                     </div>
                     <div class="strategy-section">
                         <h3 id="shared-title">Ortak simülasyon ayarları</h3>
-                        <div id="shared-config" class="config-grid" role="group" aria-labelledby="shared-title">
-                            <div class="field"><span class="field-label"><label for="position-limit">Pozisyon limiti</label><span class="help" data-help="Her hisse için izin verilen en yüksek mutlak sanal pozisyon, pay adedi cinsinden."></span></span><input id="position-limit" name="position_limit" type="number" min="1" max="1000000" step="1" required disabled></div>
-                            <div class="field"><span class="field-label"><label for="latency">Emir gecikmesi (µs)</label><span class="help" data-help="Stratejinin emir kararı ile yerel OUCH motoruna varışı arasındaki sanal süre, mikrosaniye cinsinden."></span></span><input id="latency" name="latency_us" type="number" min="0" max="10000000" step="1" required disabled></div>
-                            <div class="field"><span class="field-label"><label for="fee">Ücret (baz puan)</label><span class="help" data-help="Her gerçekleşmenin parasal değeri üzerinden simüle edilen işlem ücreti. 1 baz puan yüzde 0,01’dir."></span></span><input id="fee" name="fee_bps" type="number" min="0" max="1000" step="1" required disabled></div>
+                        <div id="shared-config" class="shared-config" role="group" aria-labelledby="shared-title">
+                            <div class="config-grid shared-grid">
+                                <div class="field"><span class="field-label"><label for="position-limit">Pozisyon limiti</label><span class="help" data-help="Her hisse için izin verilen en yüksek mutlak sanal pozisyon, pay adedi cinsinden."></span></span><input id="position-limit" name="position_limit" type="number" min="1" max="1000000" step="1" required disabled></div>
+                                <div class="field"><span class="field-label"><label for="fee">Ücret (baz puan)</label><span class="help" data-help="Her gerçekleşmenin parasal değeri üzerinden simüle edilen işlem ücreti. 1 baz puan yüzde 0,01’dir."></span></span><input id="fee" name="fee_bps" type="number" min="0" max="1000" step="1" required disabled></div>
+                            </div>
+                            <details class="shared-options">
+                                <summary>Gecikme ve değişkenlik</summary>
+                                <div class="config-grid shared-grid">
+                                    <div class="field"><span class="field-label"><label for="market-latency">Piyasa verisi gecikmesi (µs)</label><span class="help" data-help="ITCH olayının borsa zamanından stratejiye görünür olmasına kadar eklenen temel sanal süre."></span></span><input id="market-latency" name="market_latency_us" type="number" min="0" max="10000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="market-jitter">Piyasa verisi değişkenliği (µs)</label><span class="help" data-help="Piyasa verisi gecikmesine eksi ve artı yönde eklenebilen en büyük değişim. Sıfır, sabit gecikme kullanır."></span></span><input id="market-jitter" name="market_jitter_us" type="number" min="0" max="10000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="latency">Emir gecikmesi (µs)</label><span class="help" data-help="Emir gönderimi ile yerel OUCH motoruna varışı arasındaki temel sanal süre."></span></span><input id="latency" name="latency_us" type="number" min="0" max="10000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="order-jitter">Emir değişkenliği (µs)</label><span class="help" data-help="Emir gecikmesine eksi ve artı yönde eklenebilen en büyük değişim. Sıfır, sabit gecikme kullanır."></span></span><input id="order-jitter" name="order_jitter_us" type="number" min="0" max="10000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="reply-latency">Yanıt gecikmesi (µs)</label><span class="help" data-help="OUCH yanıtının motorda oluşması ile strateji veya istemciye teslimi arasındaki temel sanal süre."></span></span><input id="reply-latency" name="reply_latency_us" type="number" min="0" max="10000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="reply-jitter">Yanıt değişkenliği (µs)</label><span class="help" data-help="OUCH yanıtı gecikmesine eksi ve artı yönde eklenebilen en büyük değişim. Sıfır, sabit gecikme kullanır."></span></span><input id="reply-jitter" name="reply_jitter_us" type="number" min="0" max="10000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="latency-seed">Gecikme tohumu</label><span class="help" data-help="Gecikme değişimlerinin üretildiği başlangıç değeri. Aynı tohum, ayarlar ve kayıt aynı gecikme dizisini verir."></span></span><input id="latency-seed" name="latency_seed" type="number" min="0" max="4294967295" step="1" required disabled></div>
+                                </div>
+                            </details>
+                            <details class="shared-options">
+                                <summary>Emir ve portföy limitleri</summary>
+                                <div class="config-grid shared-grid">
+                                    <div class="field"><span class="field-label"><label for="order-size-limit">Emir miktarı limiti</label><span class="help" data-help="Tek bir emirde izin verilen en yüksek açık miktar, pay adedi cinsinden. Sıfır, bu limiti kapatır."></span></span><input id="order-size-limit" name="order_size_limit" type="number" min="0" max="1000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="order-rate-limit">Emir hızı limiti</label><span class="help" data-help="Tüm hisselerde bir sanal saniyede izin verilen yeni emir ve değişiklik isteklerinin sayısı. İptaller bu sınıra dahil değildir. Sıfır, bu limiti kapatır."></span></span><input id="order-rate-limit" name="order_rate_limit" type="number" min="0" max="1000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="gross-limit">Brüt risk limiti (₺)</label><span class="help" data-help="Açık emirlerin olası gerçekleşmelerini de hesaba katan portföy geneli brüt pozisyon değerinin üst sınırı. Sıfır, bu limiti kapatır."></span></span><input id="gross-limit" name="gross_limit_tl" type="number" min="0" max="10000000000" step="1" required disabled></div>
+                                    <div class="field"><span class="field-label"><label for="loss-limit">Zarar limiti (₺)</label><span class="help" data-help="Portföyün toplam zararı bu tutara ulaşırsa açık emirler iptal edilir ve yeni emirler kilitlenir. Sıfır, bu limiti kapatır."></span></span><input id="loss-limit" name="loss_limit_tl" type="number" min="0" max="10000000000" step="1" required disabled></div>
+                                </div>
+                            </details>
                         </div>
                     </div>
                     <p class="strategy-feedback" id="strategy-feedback" role="status" hidden></p>
